@@ -13,6 +13,7 @@ const SKILL: &str = include_str!("../assets/skill.md");
 const STARTER_TOML: &str = include_str!("../assets/summoner-starter.toml");
 
 pub const CHARTER: &str = include_str!("../assets/charter.md");
+pub const REVIEW_CHARTER: &str = include_str!("../assets/review-charter.md");
 
 #[derive(Serialize)]
 pub struct Report {

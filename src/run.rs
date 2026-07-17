@@ -7,7 +7,9 @@ use crate::events::EventSink;
 use crate::executor::{self, ExecRequest};
 use crate::grove::{BeginOutcome, FinishOutcome, GroveCli};
 use crate::order::{self, Order};
-use crate::report::{DiffStats, OrderReport, Outcome, RunReport};
+use crate::report::{DiffStats, OrderReport, Outcome, ReviewSummary, RunReport};
+use crate::review;
+use crate::tripwires;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -78,7 +80,10 @@ pub fn resume(config: &Config, run_id: &str, stream: bool) -> Result<i32> {
             prior_branches.insert(id.to_string(), branch.to_string());
         }
         if let Some(outcome) = entry["outcome"].as_str().and_then(Outcome::from_key)
-            && matches!(outcome, Outcome::Verified | Outcome::Completed)
+            && matches!(
+                outcome,
+                Outcome::Verified | Outcome::Completed | Outcome::Approved
+            )
         {
             carried_outcomes.insert(id.to_string(), outcome);
         }
@@ -113,7 +118,7 @@ pub fn resume(config: &Config, run_id: &str, stream: bool) -> Result<i32> {
 /// Load, warn, and fail-fast validate a batch before anything is dispatched.
 fn validated(paths: &[PathBuf], config: &Config) -> Result<Vec<Order>> {
     let orders = order::load(paths)?;
-    for warning in order::warnings(&orders) {
+    for warning in order::warnings(&orders, config) {
         eprintln!("summoner: warning: {warning}");
     }
     let problems = order::validate(&orders, config);
@@ -256,19 +261,20 @@ fn preflight_env(orders: &[Order], config: &Config) -> Result<()> {
     let mut missing = Vec::new();
     let mut checked = std::collections::BTreeSet::new();
     for order in orders {
-        let Some(name) = order.executor_name(config) else {
-            continue;
-        };
-        if !checked.insert(name.clone()) {
-            continue;
-        }
-        if let Some(backend) = config.executors.get(&name) {
-            for var in &backend.env_required {
-                if std::env::var(var).is_err() {
-                    missing.push(format!(
-                        "executor {name:?} needs ${var} (interactive-shell exports do not reach \
-                         summoner; export it here or persist it via the backend's auth flow)"
-                    ));
+        let names = [order.executor_name(config), order.reviewer_name(config)];
+        for name in names.into_iter().flatten() {
+            if !checked.insert(name.clone()) {
+                continue;
+            }
+            if let Some(backend) = config.executors.get(&name) {
+                for var in &backend.env_required {
+                    if std::env::var(var).is_err() {
+                        missing.push(format!(
+                            "executor {name:?} needs ${var} (interactive-shell exports do not \
+                             reach summoner; export it here or persist it via the backend's \
+                             auth flow)"
+                        ));
+                    }
                 }
             }
         }
@@ -328,10 +334,13 @@ fn drive(ctx: &Ctx, order: &Order, executor_name: &str, report: &mut OrderReport
     report.branch = git(&worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
     report.base_commit = git(&worktree, &["rev-parse", "HEAD"]).ok();
 
-    match ctx
-        .grove
-        .task_begin(&worktree, &agent, &order.title, &order.scope)?
-    {
+    match ctx.grove.task_begin(
+        &worktree,
+        &agent,
+        &order.title,
+        &order.scope,
+        order.claim_group.as_deref(),
+    )? {
         BeginOutcome::Begun { task } => report.task_id = Some(task.id),
         BeginOutcome::Conflict { conflicts } => {
             report.outcome = Outcome::Blocked;
@@ -375,6 +384,7 @@ fn drive(ctx: &Ctx, order: &Order, executor_name: &str, report: &mut OrderReport
         }),
     );
     let exec_started = Instant::now();
+    let prompt = executor::compose_prompt(order);
     let exec = executor::run_executor(&ExecRequest {
         grove: &ctx.grove,
         backend,
@@ -385,6 +395,8 @@ fn drive(ctx: &Ctx, order: &Order, executor_name: &str, report: &mut OrderReport
         run_dir: &order_dir,
         timeout_secs,
         shutdown: &SHUTDOWN,
+        prompt: &prompt,
+        file_prefix: "",
     })?;
     report.timing.exec_secs = exec_started.elapsed().as_secs();
     report.executor_exit = exec.exit;
@@ -445,14 +457,104 @@ fn drive(ctx: &Ctx, order: &Order, executor_name: &str, report: &mut OrderReport
         return Ok(());
     }
 
-    // Verification, finish-driven: run the order's profile, attempt finish,
-    // then run exactly what the refusal names before one retry.
+    // Deterministic anti-hacking scan before any evidence is trusted. A
+    // modified verification config invalidates the receipts it would produce,
+    // so that is a hard stop; soft flags ride along to the reviewer.
+    let base = report.base_commit.clone().unwrap_or_else(|| "HEAD".into());
+    let trips = tripwires::scan(&worktree, &base);
+    report.tripwires = trips.flags.clone();
+    if !trips.protected.is_empty() {
+        report.outcome = Outcome::Unverified;
+        report.detail = Some(format!(
+            "protected file(s) modified: {}; verification evidence is untrustworthy",
+            trips.protected.join(", ")
+        ));
+        finalize(
+            ctx,
+            order,
+            &task_id,
+            &worktree,
+            report,
+            Some("summoner: protected verification config modified"),
+        );
+        return Ok(());
+    }
+
+    // Verification, finish-driven: run the order's profile, gate through the
+    // independent reviewer while the task is still live, then attempt finish
+    // and run exactly what a refusal names before one retry.
     let verify_started = Instant::now();
-    verification(ctx, order, &task_id, &worktree, report)?;
+    let mut ran = std::collections::BTreeSet::new();
+    let verified = profile_verify(ctx, order, &task_id, &worktree, report, &mut ran)?;
     report.timing.verify_secs = verify_started.elapsed().as_secs();
+    if !verified {
+        let abandon = match report.outcome {
+            Outcome::Interrupted => Some("summoner: interrupted by operator"),
+            _ => Some("summoner: verification failed"),
+        };
+        finalize(ctx, order, &task_id, &worktree, report, abandon);
+        return Ok(());
+    }
+
+    let decision = match order.reviewer_name(ctx.config) {
+        Some(reviewer) => Some(review_gate(
+            ctx,
+            order,
+            &reviewer,
+            &task_id,
+            &worktree,
+            &git_common_dir,
+            &order_dir,
+            &base,
+            report,
+        )?),
+        None => None,
+    };
+    if matches!(decision, Some(ReviewDecision::Interrupted)) {
+        report.outcome = Outcome::Interrupted;
+        report.detail = Some("interrupted during review".into());
+        finalize(
+            ctx,
+            order,
+            &task_id,
+            &worktree,
+            report,
+            Some("summoner: interrupted by operator"),
+        );
+        return Ok(());
+    }
+
+    finish_task(ctx, order, &task_id, &worktree, report, &mut ran)?;
+    // The gate only ever narrows a success; a verification failure at finish
+    // outranks whatever the reviewer thought.
+    if matches!(report.outcome, Outcome::Verified | Outcome::Completed) {
+        match decision {
+            Some(ReviewDecision::Approve) if report.outcome == Outcome::Verified => {
+                report.outcome = Outcome::Approved;
+            }
+            // Completed stays completed: approval cannot substitute for the
+            // verification the repository never required.
+            Some(ReviewDecision::Approve) | None => {}
+            Some(ReviewDecision::Reject) => {
+                report.outcome = Outcome::Rejected;
+                report.detail = Some("review rejected; see review findings".into());
+            }
+            Some(ReviewDecision::Failed(reason)) => {
+                report.outcome = Outcome::ReviewFailed;
+                report.detail = Some(reason);
+            }
+            Some(ReviewDecision::Interrupted) => unreachable!("handled before finish"),
+        }
+    }
 
     let abandon = match report.outcome {
-        Outcome::Verified | Outcome::Completed => None,
+        // Review outcomes land after a successful finish: the task is
+        // terminal, only the gate's judgment differs.
+        Outcome::Verified
+        | Outcome::Completed
+        | Outcome::Approved
+        | Outcome::Rejected
+        | Outcome::ReviewFailed => None,
         Outcome::ScopeViolation => Some("summoner: writes outside declared scope"),
         Outcome::Interrupted => Some("summoner: interrupted by operator"),
         _ => Some("summoner: verification failed"),
@@ -461,21 +563,23 @@ fn drive(ctx: &Ctx, order: &Order, executor_name: &str, report: &mut OrderReport
     Ok(())
 }
 
-fn verification(
+/// The order's own verification profile. Returns false when the outcome is
+/// already decided (profile failed or the run was interrupted).
+fn profile_verify(
     ctx: &Ctx,
     order: &Order,
     task_id: &str,
     worktree: &Path,
     report: &mut OrderReport,
-) -> Result<()> {
+    ran: &mut std::collections::BTreeSet<String>,
+) -> Result<bool> {
     // An interrupt cannot stop a verify subprocess mid-flight, but it must not
     // start the next one; the convergent tail still abandons and releases.
     if SHUTDOWN.load(Ordering::SeqCst) {
         report.outcome = Outcome::Interrupted;
         report.detail = Some("interrupted before verification".into());
-        return Ok(());
+        return Ok(false);
     }
-    let mut ran = std::collections::BTreeSet::new();
     if let Some(profile) = order
         .verify_profile
         .clone()
@@ -492,10 +596,23 @@ fn verification(
         if !passed {
             report.outcome = Outcome::Unverified;
             report.detail = Some(format!("verify profile {profile:?} failed"));
-            return Ok(());
+            return Ok(false);
         }
     }
+    Ok(true)
+}
 
+/// Finish, refusal-driven: attempt it, run exactly the profiles a refusal
+/// names, retry once.
+fn finish_task(
+    ctx: &Ctx,
+    order: &Order,
+    task_id: &str,
+    worktree: &Path,
+    report: &mut OrderReport,
+    ran: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let _ = order;
     for attempt in 0..2 {
         if SHUTDOWN.load(Ordering::SeqCst) {
             report.outcome = Outcome::Interrupted;
@@ -575,6 +692,140 @@ fn verification(
     unreachable!("finish loop returns within two attempts");
 }
 
+enum ReviewDecision {
+    Approve,
+    Reject,
+    Failed(String),
+    Interrupted,
+}
+
+/// The independent quality gate: a fresh reviewer backend spawned under the
+/// order's live task, given the requirements and the diff — never the
+/// implementer's transcript. Any write it makes is undone and voids its
+/// verdict, so an approve can only come from a reviewer that stayed read-only.
+#[allow(clippy::too_many_arguments)]
+fn review_gate(
+    ctx: &Ctx,
+    order: &Order,
+    reviewer: &str,
+    task_id: &str,
+    worktree: &Path,
+    git_common_dir: &Path,
+    order_dir: &Path,
+    base: &str,
+    report: &mut OrderReport,
+) -> Result<ReviewDecision> {
+    let backend = &ctx.config.executors[reviewer];
+    let timeout_secs = backend
+        .timeout_secs
+        .unwrap_or_else(|| ctx.config.order_timeout_secs());
+    let range = format!("{base}..HEAD");
+    let diff = git(worktree, &["diff", &range]).unwrap_or_default();
+    let diff_stat = git(worktree, &["diff", "--stat", &range]).unwrap_or_default();
+    let prompt = review::compose_prompt(
+        order,
+        base,
+        &report.tripwires,
+        &report.verify,
+        &diff,
+        &diff_stat,
+    );
+    let before = review::snapshot(worktree)?;
+    let started = Instant::now();
+    let exec = executor::run_executor(&ExecRequest {
+        grove: &ctx.grove,
+        backend,
+        order,
+        task_id,
+        worktree,
+        git_common_dir,
+        run_dir: order_dir,
+        timeout_secs,
+        shutdown: &SHUTDOWN,
+        prompt: &prompt,
+        file_prefix: "review-",
+    })?;
+    let stdout_log = order_dir.join("review-stdout.log");
+    let mut summary = ReviewSummary {
+        reviewer: reviewer.to_string(),
+        verdict: "failed".into(),
+        detail: None,
+        findings: Vec::new(),
+        exit: exec.exit,
+        duration_secs: started.elapsed().as_secs(),
+        stdout_log: Some(stdout_log.display().to_string()),
+        stderr_log: Some(order_dir.join("review-stderr.log").display().to_string()),
+    };
+    if let Some(marker) = &backend.usage_marker
+        && let Some(extra) = ["review-stderr.log", "review-stdout.log"]
+            .iter()
+            .find_map(|name| {
+                executor::tail(&order_dir.join(name), 8192)
+                    .as_deref()
+                    .and_then(|text| number_after(text, marker))
+            })
+    {
+        report.usage_tokens = Some(report.usage_tokens.unwrap_or(0).saturating_add(extra));
+    }
+    let violations = review::restore(worktree, &before)?;
+
+    let decision = if exec.backup_killed {
+        kill_recorded_group(ctx, task_id, worktree);
+        summary.detail = Some("review supervisor did not return; backup deadline fired".into());
+        ReviewDecision::Failed("review failed: supervisor wedged".into())
+    } else if SHUTDOWN.load(Ordering::SeqCst) {
+        summary.detail = Some("interrupted by operator".into());
+        ReviewDecision::Interrupted
+    } else if !violations.is_empty() {
+        summary.detail = Some(format!(
+            "reviewer modified the worktree (undone): {}",
+            violations.join(", ")
+        ));
+        ReviewDecision::Failed("review failed: reviewer modified the worktree".into())
+    } else if exec.exit == Some(124) {
+        summary.detail = Some("review timed out".into());
+        ReviewDecision::Failed("review failed: timeout".into())
+    } else if exec.exit != Some(0) {
+        summary.detail = Some(format!("reviewer exited {:?}", exec.exit));
+        ReviewDecision::Failed(format!("review failed: reviewer exited {:?}", exec.exit))
+    } else {
+        match executor::tail(&stdout_log, 64 * 1024)
+            .as_deref()
+            .and_then(review::parse_verdict)
+        {
+            Some(parsed) => {
+                summary.findings = parsed.findings;
+                match parsed.verdict {
+                    review::Verdict::Approve => {
+                        summary.verdict = "approve".into();
+                        ReviewDecision::Approve
+                    }
+                    review::Verdict::Reject => {
+                        summary.verdict = "reject".into();
+                        ReviewDecision::Reject
+                    }
+                }
+            }
+            None => {
+                summary.detail = Some("no verdict JSON in reviewer output".into());
+                ReviewDecision::Failed("review failed: no verdict in output".into())
+            }
+        }
+    };
+    ctx.events.emit(
+        "order_review",
+        serde_json::json!({
+            "id": order.id,
+            "reviewer": reviewer,
+            "verdict": summary.verdict,
+            "findings": summary.findings.len(),
+            "detail": summary.detail,
+        }),
+    );
+    report.review = Some(summary);
+    Ok(decision)
+}
+
 /// The convergent tail: abandon a non-terminal task, collect diff evidence,
 /// read log tails, release (or deliberately keep) the worktree.
 fn finalize(
@@ -609,7 +860,10 @@ fn finalize(
     }
 
     let keep = ctx.config.keep_failed_worktrees()
-        && !matches!(report.outcome, Outcome::Verified | Outcome::Completed);
+        && !matches!(
+            report.outcome,
+            Outcome::Verified | Outcome::Completed | Outcome::Approved
+        );
     if keep {
         report.detail = Some(match report.detail.take() {
             Some(detail) => format!("{detail}; worktree kept for post-mortem"),
@@ -622,7 +876,10 @@ fn finalize(
         // exit 0. Deliberate keep_failed_worktrees is different — that skip is
         // requested, not a failure.
         if report.release_error.is_some()
-            && matches!(report.outcome, Outcome::Verified | Outcome::Completed)
+            && matches!(
+                report.outcome,
+                Outcome::Verified | Outcome::Completed | Outcome::Approved
+            )
         {
             report.outcome = Outcome::Error;
         }
@@ -697,7 +954,7 @@ impl Scheduler {
             let mut condemned = None;
             for dep in &self.pending[index].after {
                 match self.done.get(dep) {
-                    Some(Outcome::Verified | Outcome::Completed) => {}
+                    Some(Outcome::Verified | Outcome::Completed | Outcome::Approved) => {}
                     Some(outcome) => {
                         condemned = Some(format!("dependency {dep:?} was {}", outcome.key()));
                         break;
@@ -735,6 +992,8 @@ impl Scheduler {
                 | Outcome::ExecutorFailed
                 | Outcome::ScopeViolation
                 | Outcome::Unverified
+                | Outcome::ReviewFailed
+                | Outcome::Rejected
         ) {
             self.failures += 1;
         }

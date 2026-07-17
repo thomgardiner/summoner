@@ -9,6 +9,12 @@
 # with the same name.
 
 # default_executor       = "mytool"
+# default_reviewer       = "othertool" # independent review gate: judges each
+#                                      # verified order (approve/reject) from a
+#                                      # fresh context; use a different vendor
+#                                      # than the implementer and configure it
+#                                      # read-only. Orders opt out with
+#                                      # reviewer = "none".
 # max_parallel           = 2
 # default_verify_profile = "fast"
 # order_timeout_secs     = 600
@@ -37,6 +43,10 @@
 #   {git_common_dir} the repository's shared .git dir; a sandboxed executor
 #                    needs it writable to commit from a linked worktree
 #   {order_file}     absolute path of the original order file
+#
+# N-version dispatch: a work order may set `variants = ["mytool", "other"]`
+# instead of `executor` to race several executors over the same order. Each
+# gets its own worktree and branch; review the attempts and land one winner.
 #
 # Safety: never disable your executor CLI's own permission or sandbox system
 # to make a preset work. Prefer explicit allowlists (tools, writable roots)

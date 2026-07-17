@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub default_executor: Option<String>,
+    /// Executor name spawned as an independent reviewer after each order
+    /// verifies. Orders override with `reviewer = "<name>"` or opt out with
+    /// `reviewer = "none"`.
+    pub default_reviewer: Option<String>,
     pub max_parallel: Option<usize>,
     pub default_verify_profile: Option<String>,
     pub order_timeout_secs: Option<u64>,
@@ -70,6 +74,13 @@ impl Config {
             .ok()
             .filter(|v| !v.trim().is_empty())
             .or_else(|| self.default_executor.clone())
+    }
+
+    pub fn default_reviewer(&self) -> Option<String> {
+        std::env::var("SUMMONER_DEFAULT_REVIEWER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| self.default_reviewer.clone())
     }
 
     pub fn max_parallel(&self) -> usize {
@@ -185,6 +196,7 @@ fn repo_config_path_from(cwd: &Path) -> Option<PathBuf> {
 
 fn merge(base: &mut Config, over: Config) {
     base.default_executor = over.default_executor.or(base.default_executor.take());
+    base.default_reviewer = over.default_reviewer.or(base.default_reviewer.take());
     base.max_parallel = over.max_parallel.or(base.max_parallel);
     base.default_verify_profile = over
         .default_verify_profile

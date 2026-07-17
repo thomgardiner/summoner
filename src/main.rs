@@ -11,8 +11,11 @@ mod executor;
 mod grove;
 mod init;
 mod order;
+mod plan;
 mod report;
+mod review;
 mod run;
+mod tripwires;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -40,6 +43,12 @@ enum Cmd {
     Config,
     /// Validate order files without dispatching anything.
     Check {
+        /// Order files or directories of *.toml / *.json orders.
+        paths: Vec<PathBuf>,
+    },
+    /// Analyze a proposed batch before dispatching: claim conflicts, package
+    /// couplings, suggested waves, and after edges the orders do not declare.
+    Plan {
         /// Order files or directories of *.toml / *.json orders.
         paths: Vec<PathBuf>,
     },
@@ -97,7 +106,7 @@ fn dispatch() -> Result<i32> {
         Cmd::Check { paths } => {
             let resolved = config::load();
             let orders = order::load(&paths)?;
-            for warning in order::warnings(&orders) {
+            for warning in order::warnings(&orders, &resolved.config) {
                 eprintln!("summoner: warning: {warning}");
             }
             let problems = order::validate(&orders, &resolved.config);
@@ -111,6 +120,7 @@ fn dispatch() -> Result<i32> {
                 Ok(2)
             }
         }
+        Cmd::Plan { paths } => plan::plan(&config::load().config, &paths),
         Cmd::Run { paths, stream } => run::run(&config::load().config, &paths, stream),
         Cmd::Resume { run_id, stream } => run::resume(&config::load().config, &run_id, stream),
         Cmd::Status => {

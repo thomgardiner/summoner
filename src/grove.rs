@@ -186,11 +186,15 @@ impl GroveCli {
         agent: &str,
         title: &str,
         scope: &[String],
+        claim_group: Option<&str>,
     ) -> Result<BeginOutcome> {
         let mut args = vec![
             "task", "begin", "--agent", agent, "--task", title, "--scope",
         ];
         args.extend(scope.iter().map(String::as_str));
+        if let Some(group) = claim_group {
+            args.extend(["--claim-group", group]);
+        }
         let value = self.domain(worktree, &args)?;
         parse_begin(value)
     }
@@ -251,6 +255,40 @@ impl GroveCli {
 
     pub fn task_status(&self, repo: &Path) -> Result<serde_json::Value> {
         self.domain(repo, &["task", "status", "--json"])
+    }
+
+    /// Partition analysis: proposed scope sets in, conflicts / couplings /
+    /// waves out. Exit 1 means conflicts were found — still a verdict.
+    pub fn partition(&self, repo: &Path, sets: &serde_json::Value) -> Result<serde_json::Value> {
+        use std::io::Write;
+        let mut child = Command::new(&self.bin)
+            .args(["plan", "--partition"])
+            .current_dir(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("running {} plan --partition", self.bin))?;
+        child
+            .stdin
+            .take()
+            .context("partition stdin unavailable")?
+            .write_all(sets.to_string().as_bytes())
+            .context("writing scope sets")?;
+        let output = child
+            .wait_with_output()
+            .context("waiting for grove plan --partition")?;
+        let code = output.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if matches!(code, 0 | 1)
+            && let Ok(value) = serde_json::from_str(stdout.trim())
+        {
+            return Ok(value);
+        }
+        bail!(
+            "grove plan --partition failed (exit {code}): {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
     }
 }
 

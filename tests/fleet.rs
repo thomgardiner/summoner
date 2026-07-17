@@ -143,6 +143,25 @@ impl Fixture {
         self.commit_all("config tweak");
     }
 
+    /// A "judge" reviewer backend plus `default_reviewer` pointing at it.
+    /// Must run after `executor()`, which rewrites the config file whole.
+    fn reviewer(&self, body: &str) {
+        let script = self.base.path().join("judge-executor.sh");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let existing = std::fs::read_to_string(self.repo.join(".summoner.toml")).unwrap();
+        std::fs::write(
+            self.repo.join(".summoner.toml"),
+            format!(
+                "default_reviewer = \"judge\"\n{existing}\n[executors.judge]\n\
+                 argv = [\"{}\"]\nprompt = \"stdin\"\ntimeout_secs = 60\n",
+                script.display()
+            ),
+        )
+        .unwrap();
+        self.commit_all("reviewer fixture");
+    }
+
     fn order(&self, name: &str, body: &str) -> PathBuf {
         let orders = self.base.path().join("orders");
         std::fs::create_dir_all(&orders).unwrap();
@@ -244,6 +263,225 @@ fn happy_path_order_is_verified_released_and_salvaged_to_its_branch() {
     assert_eq!(
         fixture.task_states(),
         [("smn-wave".into(), "finished".into())]
+    );
+}
+
+#[test]
+fn approving_reviewer_upgrades_verified_to_approved_and_exit_zero() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    fixture.reviewer("echo '{\"verdict\":\"approve\",\"findings\":[]}'");
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let report = fixture.run_report(&[&order], 0);
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "approved", "{report}");
+    assert_eq!(entry["review"]["reviewer"], "judge", "{report}");
+    assert_eq!(entry["review"]["verdict"], "approve", "{report}");
+    assert_eq!(entry["finish"]["verified"], true, "{report}");
+    assert_eq!(report["summary"]["approved"], 1, "{report}");
+    // The review prompt is on disk next to the executor's: independent record.
+    let prompt = std::fs::read_to_string(
+        PathBuf::from(entry["review"]["stdout_log"].as_str().unwrap())
+            .parent()
+            .unwrap()
+            .join("review-prompt.md"),
+    )
+    .unwrap();
+    assert!(
+        prompt.contains("# Review charter"),
+        "review charter present"
+    );
+    assert!(
+        !prompt.contains("# Worker charter"),
+        "implementer charter must not leak into the review"
+    );
+    assert_eq!(
+        fixture.task_states(),
+        [("smn-wave".into(), "finished".into())]
+    );
+}
+
+#[test]
+fn rejecting_reviewer_downgrades_verified_work_and_carries_findings() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    fixture.reviewer(
+        "echo '{\"verdict\":\"reject\",\"findings\":[{\"severity\":\"blocker\",\"file\":\"src/lib.rs\",\"line\":1,\"summary\":\"hardcoded expected value\"}]}'",
+    );
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let report = fixture.run_report(&[&order], 1);
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "rejected", "{report}");
+    assert_eq!(
+        entry["review"]["findings"][0]["summary"], "hardcoded expected value",
+        "{report}"
+    );
+    // The work is still finished and salvaged: the orchestrator reviews the
+    // findings against a real branch, not a lost worktree.
+    assert_eq!(entry["finish"]["verified"], true, "{report}");
+    let show = Command::new("git")
+        .args(["show", "grove/smn-wave:src/lib.rs"])
+        .current_dir(&fixture.repo)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&show.stdout).contains("pub fn wave()"));
+}
+
+#[test]
+fn a_reviewer_that_writes_voids_its_verdict_and_the_writes_are_undone() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    fixture.reviewer("echo sneaky > planted.txt\necho '{\"verdict\":\"approve\",\"findings\":[]}'");
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let report = fixture.run_report(&[&order], 1);
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "review_failed", "{report}");
+    assert!(
+        entry["review"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("modified the worktree"),
+        "{report}"
+    );
+    // The planted file never reaches the branch; the executor's work does.
+    let show = Command::new("git")
+        .args(["show", "grove/smn-wave:planted.txt"])
+        .current_dir(&fixture.repo)
+        .output()
+        .unwrap();
+    assert!(!show.status.success(), "planted file must not be salvaged");
+    let show = Command::new("git")
+        .args(["show", "grove/smn-wave:src/lib.rs"])
+        .current_dir(&fixture.repo)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&show.stdout).contains("pub fn wave()"));
+}
+
+#[test]
+fn modifying_verification_config_caps_the_outcome_at_unverified() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo '# weakened' >> .grove.toml\ngit add -A\ngit commit -qm 'hack the verifier'",
+        60,
+    );
+    let order = fixture.order(
+        "hack.toml",
+        r#"
+id = "hack"
+title = "Try to weaken the gate"
+brief = "Modify the verification config."
+scope = ["src", ".grove.toml"]
+verify_profile = "fast"
+"#,
+    );
+
+    let report = fixture.run_report(&[&order], 1);
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "unverified", "{report}");
+    assert!(
+        entry["detail"].as_str().unwrap().contains("protected"),
+        "{report}"
+    );
+    assert_eq!(
+        entry["tripwires"][0], "protected file modified: .grove.toml",
+        "{report}"
+    );
+    // Nothing was verified or finished on a compromised config.
+    assert_eq!(
+        fixture.task_states(),
+        [("smn-hack".into(), "abandoned".into())]
+    );
+}
+
+#[test]
+fn variants_race_the_same_scope_and_both_land_on_their_own_branches() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn from_fake() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'fake work'",
+        60,
+    );
+    // A second backend racing the same order: same scope, different output.
+    let script = fixture.base.path().join("fake2-executor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho 'pub fn from_fake2() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'fake2 work'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fixture.append_config(&format!(
+        "\n[executors.fake2]\nargv = [\"{}\"]\nprompt = \"stdin\"\ntimeout_secs = 60",
+        script.display()
+    ));
+    let order = fixture.order(
+        "race.toml",
+        r#"
+id = "race"
+title = "Race two executors over one order"
+brief = "Append a function to src/lib.rs and commit."
+scope = ["src"]
+verify_profile = "fast"
+variants = ["fake", "fake2"]
+"#,
+    );
+
+    let report = fixture.run_report(&[&order], 0);
+    assert_eq!(report["summary"]["verified"], 2, "{report}");
+    for (entry, executor) in report["orders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(["fake", "fake2"])
+    {
+        assert_eq!(entry["id"], format!("race-{executor}"), "{report}");
+        assert_eq!(entry["outcome"], "verified", "{report}");
+        assert_eq!(entry["executor"], executor, "{report}");
+        assert_eq!(entry["variant_of"], "race", "{report}");
+        assert_eq!(
+            entry["branch"],
+            format!("grove/smn-race-{executor}"),
+            "{report}"
+        );
+    }
+
+    // Each attempt survives on its own branch; the orchestrator lands a winner.
+    for (executor, marker) in [("fake", "from_fake()"), ("fake2", "from_fake2()")] {
+        let show = Command::new("git")
+            .args(["show", &format!("grove/smn-race-{executor}:src/lib.rs")])
+            .current_dir(&fixture.repo)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&show.stdout).contains(marker),
+            "branch for {executor} missing {marker}"
+        );
+    }
+
+    let mut states = fixture.task_states();
+    states.sort();
+    assert_eq!(
+        states,
+        [
+            ("smn-race-fake".into(), "finished".into()),
+            ("smn-race-fake2".into(), "finished".into()),
+        ]
     );
 }
 
@@ -358,6 +596,121 @@ scope = ["src"]
     assert_eq!(
         fixture.task_states(),
         [("smn-wave".into(), "finished".into())]
+    );
+}
+
+#[test]
+fn plan_refutes_a_batch_then_passes_it_once_revised() {
+    require_grove!();
+    // A real two-crate workspace: app depends on core.
+    let base = TempDir::new().unwrap();
+    let repo = base.path().join("ws");
+    for (name, extra) in [("core", ""), ("app", "core = { path = \"../core\" }\n")] {
+        let dir = repo.join("crates").join(name);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{extra}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+    }
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/core\", \"crates/app\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".summoner.toml"),
+        "default_executor = \"fake\"\n[executors.fake]\nargv = [\"true\"]\nprompt = \"stdin\"\ntimeout_secs = 60\n",
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@e.com"]);
+    git(&["config", "user.name", "t"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "init"]);
+
+    let orders = base.path().join("orders");
+    std::fs::create_dir_all(&orders).unwrap();
+    std::fs::write(
+        orders.join("core.toml"),
+        "id = \"core-work\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"crate:core\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        orders.join("app.toml"),
+        "id = \"app-work\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"crate:app\"]\n",
+    )
+    .unwrap();
+
+    let plan = |expect_exit: i32| -> Value {
+        let output = Command::new(SUMMONER)
+            .args(["plan", orders.to_str().unwrap()])
+            .current_dir(&repo)
+            .env("SUMMONER_GROVE_BIN", grove_bin())
+            .env("GROVE_CACHE_ROOT", base.path().join("cache"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(expect_exit),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    // As written: app-work couples to core-work but declares nothing.
+    let report = plan(1);
+    assert_eq!(report["verdict"], "revise", "{report}");
+    assert_eq!(report["missing_after"][0]["id"], "app-work");
+    assert_eq!(report["missing_after"][0]["missing"][0], "core-work");
+    assert_eq!(
+        report["partition"]["couplings"][0]["kind"], "dependency",
+        "{report}"
+    );
+
+    // Declare the suggested edge: clean, with a two-wave schedule.
+    std::fs::write(
+        orders.join("app.toml"),
+        "id = \"app-work\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"crate:app\"]\nafter = [\"core-work\"]\n",
+    )
+    .unwrap();
+    let report = plan(0);
+    assert_eq!(report["verdict"], "clean", "{report}");
+    assert_eq!(
+        report["partition"]["waves"],
+        serde_json::json!([["core-work"], ["app-work"]])
+    );
+
+    // A genuine claim conflict is a refusal however the edges look.
+    std::fs::write(
+        orders.join("clash.toml"),
+        "id = \"clash\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"crates/core/src\"]\n",
+    )
+    .unwrap();
+    let report = plan(1);
+    assert_eq!(report["verdict"], "revise", "{report}");
+    assert!(
+        report["partition"]["conflicts"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty()),
+        "{report}"
     );
 }
 

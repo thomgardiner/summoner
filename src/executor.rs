@@ -31,6 +31,12 @@ pub struct ExecRequest<'a> {
     pub run_dir: &'a Path,
     pub timeout_secs: u64,
     pub shutdown: &'a AtomicBool,
+    /// The composed prompt. The caller chooses the charter: worker charter
+    /// for implementation, review charter for the quality gate.
+    pub prompt: &'a str,
+    /// Prefix for this spawn's files in the run dir ("" for the executor,
+    /// "review-" for the reviewer), so one order's runs never collide.
+    pub file_prefix: &'a str,
 }
 
 pub struct ExecOutcome {
@@ -90,10 +96,10 @@ pub fn expand(
 pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
     std::fs::create_dir_all(req.run_dir)
         .with_context(|| format!("creating run dir {}", req.run_dir.display()))?;
-    let prompt = compose_prompt(req.order);
+    let prompt = req.prompt.to_string();
     // Always on disk, whatever the routing: it is the post-mortem record of
     // exactly what the executor was told.
-    let prompt_path = req.run_dir.join("prompt.md");
+    let prompt_path = req.run_dir.join(format!("{}prompt.md", req.file_prefix));
     std::fs::write(&prompt_path, &prompt).context("writing prompt.md")?;
 
     let executor_argv = expand(
@@ -108,8 +114,10 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
         .grove
         .exec_argv(req.task_id, req.timeout_secs, &executor_argv);
 
-    let stdout = File::create(req.run_dir.join("stdout.log")).context("creating stdout.log")?;
-    let stderr = File::create(req.run_dir.join("stderr.log")).context("creating stderr.log")?;
+    let stdout = File::create(req.run_dir.join(format!("{}stdout.log", req.file_prefix)))
+        .context("creating stdout.log")?;
+    let stderr = File::create(req.run_dir.join(format!("{}stderr.log", req.file_prefix)))
+        .context("creating stderr.log")?;
     let mut command = Command::new(&argv[0]);
     command
         .args(&argv[1..])
@@ -207,9 +215,13 @@ mod tests {
             acceptance: vec!["tests pass".into()],
             verify_profile: None,
             executor: None,
+            reviewer: None,
             timeout_secs: None,
             base: None,
             branch: None,
+            variants: Vec::new(),
+            claim_group: None,
+            variant_of: None,
             after: Vec::new(),
             source: PathBuf::from("orders/auth-fix.toml"),
         }

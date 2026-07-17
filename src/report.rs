@@ -22,8 +22,14 @@ pub enum Outcome {
     ExecutorFailed,
     /// Finish refused: writes outside the declared scope.
     ScopeViolation,
-    /// Verification failed or finish still lacked required evidence.
+    /// Verification failed, finish lacked required evidence, or a protected
+    /// verification-config file was modified (receipts untrustworthy).
     Unverified,
+    /// A reviewer was configured but the gate could not produce a valid
+    /// verdict (timeout, no verdict line, or the reviewer wrote to the tree).
+    ReviewFailed,
+    /// The independent reviewer rejected verified work; findings say why.
+    Rejected,
     /// Operator interrupt tore the order down.
     Interrupted,
     /// Never started: the queue drained after an interrupt.
@@ -33,6 +39,8 @@ pub enum Outcome {
     Completed,
     /// Finished with fresh receipts for every required profile.
     Verified,
+    /// Verified AND approved by the independent reviewer.
+    Approved,
 }
 
 impl Outcome {
@@ -44,10 +52,13 @@ impl Outcome {
             "executor_failed" => Outcome::ExecutorFailed,
             "scope_violation" => Outcome::ScopeViolation,
             "unverified" => Outcome::Unverified,
+            "review_failed" => Outcome::ReviewFailed,
+            "rejected" => Outcome::Rejected,
             "interrupted" => Outcome::Interrupted,
             "skipped" => Outcome::Skipped,
             "completed" => Outcome::Completed,
             "verified" => Outcome::Verified,
+            "approved" => Outcome::Approved,
             _ => return None,
         })
     }
@@ -60,10 +71,13 @@ impl Outcome {
             Outcome::ExecutorFailed => "executor_failed",
             Outcome::ScopeViolation => "scope_violation",
             Outcome::Unverified => "unverified",
+            Outcome::ReviewFailed => "review_failed",
+            Outcome::Rejected => "rejected",
             Outcome::Interrupted => "interrupted",
             Outcome::Skipped => "skipped",
             Outcome::Completed => "completed",
             Outcome::Verified => "verified",
+            Outcome::Approved => "approved",
         }
     }
 }
@@ -112,13 +126,14 @@ impl RunReport {
         }
     }
 
-    /// 0 only when every order carries fresh receipts; `completed` still means
-    /// "review me", so it exits 1 like every other non-verified outcome.
+    /// 0 only when every order carries fresh receipts (with reviewer approval
+    /// where a reviewer gated it); `completed` still means "review me", so it
+    /// exits 1 like every other non-verified outcome.
     pub fn exit_code(&self) -> i32 {
         if self
             .orders
             .iter()
-            .all(|order| order.outcome == Outcome::Verified)
+            .all(|order| matches!(order.outcome, Outcome::Verified | Outcome::Approved))
         {
             0
         } else {
@@ -151,6 +166,16 @@ pub struct OrderReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release_error: Option<String>,
     pub acceptance: Vec<String>,
+    /// The original order id this entry was expanded from (N-version dispatch).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant_of: Option<String>,
+    /// Deterministic diff-scan findings (deleted tests, skip markers, config
+    /// edits) surfaced to the reviewer and the orchestrator alike.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tripwires: Vec<String>,
+    /// The independent review, when a reviewer gated this order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewSummary>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -191,6 +216,9 @@ impl OrderReport {
             saved_to: None,
             release_error: None,
             acceptance: order.acceptance.clone(),
+            variant_of: order.variant_of.clone(),
+            tripwires: Vec::new(),
+            review: None,
             after: order.after.clone(),
             verify: Vec::new(),
             finish: None,
@@ -204,6 +232,27 @@ impl OrderReport {
             timing: Timing::default(),
         }
     }
+}
+
+/// One independent review: which backend judged, what it said, and where its
+/// full transcript lives.
+#[derive(Serialize)]
+pub struct ReviewSummary {
+    pub reviewer: String,
+    /// "approve", "reject", or "failed" (no valid verdict was produced).
+    pub verdict: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The reviewer's findings, verbatim (severity/file/line/summary objects).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    pub duration_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_log: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_log: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -234,9 +283,13 @@ mod tests {
             acceptance: Vec::new(),
             verify_profile: None,
             executor: None,
+            reviewer: None,
             timeout_secs: None,
             base: None,
             branch: None,
+            variants: Vec::new(),
+            claim_group: None,
+            variant_of: None,
             after: Vec::new(),
             source: std::path::PathBuf::from(format!("{id}.toml")),
         };

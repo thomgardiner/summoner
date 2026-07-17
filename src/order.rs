@@ -20,6 +20,9 @@ pub struct Order {
     pub acceptance: Vec<String>,
     pub verify_profile: Option<String>,
     pub executor: Option<String>,
+    /// Executor name spawned as an independent reviewer after this order
+    /// verifies; overrides `default_reviewer`. `"none"` opts this order out.
+    pub reviewer: Option<String>,
     pub timeout_secs: Option<u64>,
     pub base: Option<String>,
     pub branch: Option<String>,
@@ -29,6 +32,18 @@ pub struct Order {
     /// `base = "grove/smn-<dep-id>"` (branch names are deterministic).
     #[serde(default)]
     pub after: Vec<String>,
+    /// N-version dispatch: executor names that each attempt this order
+    /// independently. The order expands into one sibling per executor
+    /// (`<id>-<executor>`), all sharing a grove claim group so they may
+    /// overlap the same scope; the orchestrator reviews and lands one winner.
+    #[serde(default)]
+    pub variants: Vec<String>,
+    /// Internal: the grove claim group variant siblings share.
+    #[serde(skip)]
+    pub claim_group: Option<String>,
+    /// Internal: the original order id a variant sibling was expanded from.
+    #[serde(skip)]
+    pub variant_of: Option<String>,
     #[serde(skip)]
     pub source: PathBuf,
 }
@@ -42,6 +57,16 @@ impl Order {
 
     pub fn executor_name(&self, config: &Config) -> Option<String> {
         self.executor.clone().or_else(|| config.default_executor())
+    }
+
+    /// The reviewer to gate this order with, after config defaults and the
+    /// `"none"` opt-out. None means the order ships ungated.
+    pub fn reviewer_name(&self, config: &Config) -> Option<String> {
+        match self.reviewer.as_deref() {
+            Some("none") => None,
+            Some(name) => Some(name.to_string()),
+            None => config.default_reviewer(),
+        }
     }
 }
 
@@ -82,7 +107,41 @@ pub fn load(paths: &[PathBuf]) -> Result<Vec<Order>> {
     if files.is_empty() {
         bail!("no order files given");
     }
-    files.iter().map(|path| parse(path)).collect()
+    let orders: Vec<Order> = files
+        .iter()
+        .map(|path| parse(path))
+        .collect::<Result<_>>()?;
+    Ok(expand_variants(orders))
+}
+
+/// One sibling per variant executor, sharing a claim group so the deliberate
+/// scope overlap does not conflict. Only one sibling's branch will land; the
+/// orchestrator picks it during review.
+fn expand_variants(orders: Vec<Order>) -> Vec<Order> {
+    orders
+        .into_iter()
+        .flat_map(|order| {
+            // An explicit executor alongside variants is ambiguous; leave it
+            // unexpanded so validation names the problem.
+            if order.variants.is_empty() || order.executor.is_some() {
+                return vec![order];
+            }
+            order
+                .variants
+                .clone()
+                .into_iter()
+                .map(|executor| {
+                    let mut sibling = order.clone();
+                    sibling.id = format!("{}-{}", order.id, executor);
+                    sibling.executor = Some(executor);
+                    sibling.claim_group = Some(order.id.clone());
+                    sibling.variant_of = Some(order.id.clone());
+                    sibling.variants = Vec::new();
+                    sibling
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn parse(path: &Path) -> Result<Order> {
@@ -146,6 +205,13 @@ pub fn validate(orders: &[Order], config: &Config) -> Vec<String> {
                 "{at}: timeout_secs must be between 1 and 604800 (7 days), got {timeout}"
             ));
         }
+        // Expansion replaced variants orders with siblings; anything still
+        // carrying both fields set them together, which is ambiguous.
+        if !order.variants.is_empty() {
+            problems.push(format!(
+                "{at}: variants and executor are mutually exclusive (variants pick executors)"
+            ));
+        }
         match order.executor_name(config) {
             None => problems.push(format!(
                 "{at}: no executor named and no default_executor configured"
@@ -158,13 +224,29 @@ pub fn validate(orders: &[Order], config: &Config) -> Vec<String> {
                 }
             }
         }
+        if let Some(name) = order.reviewer_name(config) {
+            if config.executors.contains_key(&name) {
+                used_backends.insert(name);
+            } else {
+                problems.push(format!("{at}: reviewer {name:?} is not configured"));
+            }
+        }
     }
 
+    let expanded_ids: BTreeSet<&str> = orders
+        .iter()
+        .filter_map(|o| o.variant_of.as_deref())
+        .collect();
     for order in orders {
         let at = order.source.display();
         for dep in &order.after {
             if dep == &order.id {
                 problems.push(format!("{at}: after references the order itself"));
+            } else if expanded_ids.contains(dep.as_str()) {
+                problems.push(format!(
+                    "{at}: after references {dep:?}, which expanded into variants; \
+                     name a specific sibling such as \"{dep}-<executor>\""
+                ));
             } else if !seen_ids.contains(dep) {
                 problems.push(format!("{at}: after references unknown order {dep:?}"));
             }
@@ -260,19 +342,39 @@ fn backend_problems(name: &str, backend: &ExecutorBackend) -> Vec<String> {
 /// Identical scope strings across orders are not an error (grove serializes
 /// them: the later `task begin` reports a conflict and the order lands as
 /// blocked), but they are almost always an orchestrator mistake worth naming
-/// before worktrees are spent on them.
-pub fn warnings(orders: &[Order]) -> Vec<String> {
-    let mut first_owner: BTreeMap<&str, &str> = BTreeMap::new();
+/// before worktrees are spent on them. Variant siblings share a claim group,
+/// so their deliberate overlap is not a mistake and stays quiet.
+pub fn warnings(orders: &[Order], config: &Config) -> Vec<String> {
+    let mut first_owner: BTreeMap<&str, &Order> = BTreeMap::new();
     let mut warnings = Vec::new();
+    for order in orders {
+        // A backend judging its own vendor's work loses the fresh-eyes
+        // independence the gate exists for; different vendors catch more.
+        if let (Some(reviewer), Some(executor)) =
+            (order.reviewer_name(config), order.executor_name(config))
+            && reviewer == executor
+        {
+            warnings.push(format!(
+                "order {:?}: reviewer and executor are both {executor:?}; \
+                 an independent review wants a different backend",
+                order.id
+            ));
+        }
+    }
     for order in orders {
         for entry in &order.scope {
             match first_owner.get(entry.as_str()) {
-                Some(owner) => warnings.push(format!(
-                    "orders {owner:?} and {:?} both claim scope {entry:?}; the later one will block",
-                    order.id
-                )),
+                Some(owner)
+                    if owner.claim_group.is_none() || owner.claim_group != order.claim_group =>
+                {
+                    warnings.push(format!(
+                        "orders {:?} and {:?} both claim scope {entry:?}; the later one will block",
+                        owner.id, order.id
+                    ));
+                }
+                Some(_) => {}
                 None => {
-                    first_owner.insert(entry, &order.id);
+                    first_owner.insert(entry, order);
                 }
             }
         }
@@ -494,6 +596,136 @@ acceptance = ["tests pass"]
     }
 
     #[test]
+    fn reviewer_resolution_validation_and_same_backend_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_with(
+            Some("fake"),
+            &[
+                ("fake", &["fake", "{prompt}"], PromptRouting::Arg),
+                ("judge", &["judge", "{prompt}"], PromptRouting::Arg),
+            ],
+        );
+
+        // Unknown reviewer is a validation problem.
+        let path = write_order(
+            dir.path(),
+            "ghost.toml",
+            "id = \"g\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\nreviewer = \"ghost\"\n",
+        );
+        let problems = validate(&load(&[path]).unwrap(), &config);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("reviewer \"ghost\" is not configured")),
+            "{problems:?}"
+        );
+
+        // default_reviewer applies; "none" opts out; both validate clean.
+        config.default_reviewer = Some("judge".into());
+        let gated = write_order(dir.path(), "a.toml", GOOD_TOML);
+        let opted_out = write_order(
+            dir.path(),
+            "b.toml",
+            "id = \"solo\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"x\"]\nreviewer = \"none\"\n",
+        );
+        let orders = load(&[gated, opted_out]).unwrap();
+        assert_eq!(orders[0].reviewer_name(&config).as_deref(), Some("judge"));
+        assert_eq!(orders[1].reviewer_name(&config), None);
+        assert!(validate(&orders, &config).is_empty());
+        assert!(warnings(&orders, &config).is_empty());
+
+        // Reviewer == executor loses independence: warned, not refused.
+        config.default_reviewer = Some("fake".into());
+        let warned = warnings(&orders, &config);
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("reviewer and executor are both \"fake\""));
+    }
+
+    #[test]
+    fn variants_expand_into_siblings_sharing_a_claim_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_order(
+            dir.path(),
+            "race.toml",
+            "id = \"race\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src/lib.rs\"]\nvariants = [\"fake\", \"fake2\"]\n",
+        );
+        let orders = load(&[path]).unwrap();
+        assert_eq!(orders.len(), 2);
+        for (order, executor) in orders.iter().zip(["fake", "fake2"]) {
+            assert_eq!(order.id, format!("race-{executor}"));
+            assert_eq!(order.executor.as_deref(), Some(executor));
+            assert_eq!(order.claim_group.as_deref(), Some("race"));
+            assert_eq!(order.variant_of.as_deref(), Some("race"));
+            assert!(order.variants.is_empty());
+        }
+        let config = config_with(
+            None,
+            &[
+                ("fake", &["fake", "{prompt}"], PromptRouting::Arg),
+                ("fake2", &["fake2", "{prompt}"], PromptRouting::Arg),
+            ],
+        );
+        assert!(validate(&orders, &config).is_empty());
+        // The siblings' identical scope is deliberate; no overlap warning.
+        assert!(warnings(&orders, &config).is_empty());
+    }
+
+    #[test]
+    fn variants_alongside_an_executor_are_rejected_not_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_order(
+            dir.path(),
+            "both.toml",
+            "id = \"both\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\nexecutor = \"fake\"\nvariants = [\"fake\", \"fake2\"]\n",
+        );
+        let orders = load(&[path]).unwrap();
+        assert_eq!(orders.len(), 1);
+        let config = config_with(
+            None,
+            &[
+                ("fake", &["fake", "{prompt}"], PromptRouting::Arg),
+                ("fake2", &["fake2", "{prompt}"], PromptRouting::Arg),
+            ],
+        );
+        let problems = validate(&orders, &config);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("variants and executor are mutually exclusive")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn after_naming_an_expanded_original_id_gets_a_specific_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let race = write_order(
+            dir.path(),
+            "race.toml",
+            "id = \"race\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src/a.rs\"]\nvariants = [\"fake\", \"fake2\"]\n",
+        );
+        let dep = write_order(
+            dir.path(),
+            "dep.toml",
+            "id = \"dep\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src/b.rs\"]\nafter = [\"race\"]\n",
+        );
+        let config = config_with(
+            Some("fake"),
+            &[
+                ("fake", &["fake", "{prompt}"], PromptRouting::Arg),
+                ("fake2", &["fake2", "{prompt}"], PromptRouting::Arg),
+            ],
+        );
+        let problems = validate(&load(&[race, dep]).unwrap(), &config);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("expanded into variants")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
     fn overlapping_scopes_warn_but_do_not_error() {
         let dir = tempfile::tempdir().unwrap();
         let a = write_order(dir.path(), "a.toml", GOOD_TOML);
@@ -509,7 +741,7 @@ acceptance = ["tests pass"]
         );
 
         assert!(validate(&orders, &config).is_empty());
-        let warnings = warnings(&orders);
+        let warnings = warnings(&orders, &config);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("both claim scope \"crate:auth-core\""));
     }

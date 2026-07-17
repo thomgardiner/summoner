@@ -8,9 +8,12 @@ lifecycle for delegated work, so prefer it over hand-driving
 `grove check` / `grove test` remain yours.
 
 1. Decompose the plan into work orders: one TOML or JSON file per independent
-   task in an `orders/` directory. Keep scopes tight; when the work maps to
-   packages, seed `scope` from `grove plan --json` `claim_scopes`. Give every
-   order explicit acceptance criteria and a verify profile.
+   task in an `orders/` directory. Decompose along the real package seams
+   (`grove plan --topology` prints them, with the claim scope owning each);
+   keep scopes tight and give every order explicit acceptance criteria and a
+   verify profile. Then `summoner plan orders/` refutes the batch before any
+   worktree is spent: claim conflicts, package couplings, suggested waves,
+   and missing `after` edges. Revise until `clean`.
 2. Preflight with `summoner doctor`: it checks each configured executor binary
    and its required environment, and the grove version.
 3. `summoner run orders/` executes the fleet. Each order gets an isolated
