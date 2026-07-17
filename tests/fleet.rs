@@ -281,6 +281,45 @@ fn happy_path_order_is_verified_released_and_salvaged_to_its_branch() {
         fixture.task_states(),
         [("smn-wave".into(), "finished".into())]
     );
+
+    // The run left its mark on the cross-run scorecard, and the aggregation
+    // command reads it back per repo and executor.
+    let output = fixture.summoner(&["scorecard"]);
+    assert_eq!(output.status.code(), Some(0));
+    let board: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let repo_key = board
+        .as_object()
+        .unwrap()
+        .keys()
+        .find(|key| key.contains("repo"))
+        .expect("repo entry")
+        .clone();
+    let stats = &board[&repo_key]["fake"];
+    assert_eq!(stats["orders"], 1, "{board}");
+    assert_eq!(stats["green"], 1, "{board}");
+    assert_eq!(stats["outcomes"]["verified"], 1, "{board}");
+}
+
+#[test]
+fn clean_executor_exit_without_changes_is_not_verified() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor("true", 60);
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let report = fixture.run_report(&[&order], 1);
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "unverified", "{report}");
+    assert_eq!(entry["executor_exit"], 0);
+    assert_eq!(entry["commits"], 0);
+    assert_eq!(entry["diff"]["files_changed"], 0);
+    assert!(
+        entry["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("no changes")),
+        "{report}"
+    );
+    assert!(entry.get("verify").is_none(), "{report}");
 }
 
 #[test]

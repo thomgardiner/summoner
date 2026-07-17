@@ -220,13 +220,18 @@ pub fn validate(orders: &[Order], config: &Config) -> Vec<String> {
             None => problems.push(format!(
                 "{at}: no executor named and no default_executor configured"
             )),
-            Some(name) => {
-                if config.executors.contains_key(&name) {
+            Some(name) => match config.executors.get(&name) {
+                Some(backend) => {
+                    if order.max_tokens.is_some() && backend.usage_marker.is_none() {
+                        problems.push(format!(
+                            "{at}: max_tokens needs executor {name:?} to define a \
+                             usage_marker, or the cap can never be measured"
+                        ));
+                    }
                     used_backends.insert(name);
-                } else {
-                    problems.push(format!("{at}: executor {name:?} is not configured"));
                 }
-            }
+                None => problems.push(format!("{at}: executor {name:?} is not configured")),
+            },
         }
         if let Some(name) = order.reviewer_name(config) {
             if config.executors.contains_key(&name) {
@@ -363,6 +368,33 @@ fn backend_problems(name: &str, backend: &ExecutorBackend) -> Vec<String> {
         problems.push(format!(
             "executor {name:?}: timeout_secs must be between 1 and 604800 (7 days), got {timeout}"
         ));
+    }
+    // A resume template quietly suppresses the full charter, so it must
+    // provably resume the right session and deliver the revision evidence.
+    if !backend.resume_argv.is_empty() {
+        let has_resume = |token: &str| backend.resume_argv.iter().any(|arg| arg.contains(token));
+        if backend.session_marker.is_none() {
+            problems.push(format!(
+                "executor {name:?}: resume_argv needs a session_marker to capture the \
+                 session it resumes"
+            ));
+        }
+        if !has_resume("{session_id}") {
+            problems.push(format!(
+                "executor {name:?}: resume_argv needs a {{session_id}} placeholder"
+            ));
+        }
+        match backend.routing() {
+            PromptRouting::Arg if !has_resume("{prompt}") => problems.push(format!(
+                "executor {name:?}: resume_argv needs a {{prompt}} placeholder \
+                 (routing \"arg\")"
+            )),
+            PromptRouting::File if !has_resume("{prompt_file}") => problems.push(format!(
+                "executor {name:?}: resume_argv needs a {{prompt_file}} placeholder \
+                 (routing \"file\")"
+            )),
+            _ => {}
+        }
     }
     problems
 }
@@ -576,6 +608,51 @@ acceptance = ["tests pass"]
         let problems = validate(&load(&[path]).unwrap(), &config);
         assert!(
             problems[0].contains("timeout_secs must be between"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn resume_templates_and_token_caps_must_be_measurable() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // resume_argv without a session_marker, a {session_id}, or prompt
+        // delivery is a misconfigured continuation, named field by field.
+        let mut config = config_with(
+            Some("fake"),
+            &[("fake", &["fake", "{prompt}"], PromptRouting::Arg)],
+        );
+        let backend = config.executors.get_mut("fake").unwrap();
+        backend.resume_argv = vec!["fake".into(), "resume".into()];
+        let path = write_order(dir.path(), "a.toml", GOOD_TOML);
+        let orders = load(std::slice::from_ref(&path)).unwrap();
+        let text = validate(&orders, &config).join("\n");
+        assert!(text.contains("needs a session_marker"), "{text}");
+        assert!(text.contains("{session_id} placeholder"), "{text}");
+        assert!(
+            text.contains("resume_argv needs a {prompt} placeholder"),
+            "{text}"
+        );
+
+        let backend = config.executors.get_mut("fake").unwrap();
+        backend.session_marker = Some("session id:".into());
+        backend.resume_argv = vec![
+            "fake".into(),
+            "resume".into(),
+            "{session_id}".into(),
+            "{prompt}".into(),
+        ];
+        assert!(validate(&orders, &config).is_empty());
+
+        // max_tokens without a usage_marker can never be measured.
+        let capped = write_order(
+            dir.path(),
+            "capped.toml",
+            "id = \"capped\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\nmax_tokens = 1000\n",
+        );
+        let problems = validate(&load(&[capped]).unwrap(), &config);
+        assert!(
+            problems.iter().any(|p| p.contains("usage_marker")),
             "{problems:?}"
         );
     }

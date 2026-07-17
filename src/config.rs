@@ -63,6 +63,10 @@ pub struct ExecutorBackend {
     /// Literal program and arguments, expanded per order. Placeholders:
     /// `{prompt}`, `{worktree}`, `{order_file}`, `{prompt_file}`. Elements are
     /// never shell-joined, so vendor greedy-flag orderings survive verbatim.
+    /// Optional so a repo override can be genuinely partial (inherit the
+    /// command, change a marker); an executor with no argv anywhere fails
+    /// validation, not parsing.
+    #[serde(default)]
     pub argv: Vec<String>,
     /// Absent means "inherit" when a same-name executor exists in an earlier
     /// config layer, and defaults to `arg` otherwise (see `routing()`).

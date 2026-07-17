@@ -6,15 +6,19 @@
 //! needing review, 2 usage or infrastructure error.
 
 mod config;
+mod drive;
 mod events;
 mod executor;
+mod gate;
 mod grove;
 mod init;
 mod order;
+mod outcome;
 mod plan;
 mod report;
 mod review;
 mod run;
+mod scorecard;
 mod tripwires;
 mod watch;
 
@@ -84,6 +88,12 @@ enum Cmd {
         /// A run id from a report or run directory name.
         run_id: Option<String>,
     },
+    /// Aggregated per-repo, per-executor outcomes across all past runs.
+    Scorecard {
+        /// Only repositories whose path contains this substring.
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// Summoner-owned grove tasks (owner prefix smn-), as JSON.
     Status,
     /// Check every configured executor and the grove binary; fail fast on setup problems.
@@ -145,6 +155,7 @@ fn dispatch() -> Result<i32> {
         Cmd::Run { paths, stream } => run::run(&resolved()?.config, &paths, stream),
         Cmd::Resume { run_id, stream } => run::resume(&resolved()?.config, &run_id, stream),
         Cmd::Watch { run_id } => watch::watch(run_id),
+        Cmd::Scorecard { repo } => scorecard::scorecard(repo),
         Cmd::Status => {
             let resolved = resolved()?;
             let grove = grove::GroveCli::new(resolved.config.grove_bin());

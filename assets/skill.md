@@ -79,7 +79,8 @@ outcomes. Everything between is Summoner's job.
    `attempts` field says how many tries an entry took, and `session_id`
    lets you resume the executor's context manually. `run_token_budget`
    and per-order `max_tokens` bound the spend; `summoner watch` shows the
-   fleet live.
+   fleet live. Before decomposing, check `summoner scorecard` — pick
+   executors from their per-repo track record, not habit.
 
 ## Rules
 

@@ -126,8 +126,15 @@ pub fn compose_revision_prompt(
          and it was NOT accepted. The evidence:\n\n",
     );
     prompt.push_str(feedback);
+    // A forced reflection measurably cuts agents that loop on a dead
+    // approach: name the failure before touching the code.
     prompt.push_str(
-        "\n\nAddress every point, amend the work on this branch, and commit. \
+        "\n\nBefore changing anything, answer for yourself:\n\
+         - What exactly failed, in one sentence?\n\
+         - What specific change fixes it?\n\
+         - Would this repeat the approach that already failed? If so, take a \
+         different one.\n\n\
+         Then address every point, amend the work on this branch, and commit. \
          The same scope and acceptance criteria apply; verification and \
          review run again.\n",
     );
@@ -280,6 +287,26 @@ mod tests {
         assert!(charter_at < scope_at);
         assert!(scope_at < acceptance_at);
         assert!(acceptance_at < brief_at);
+    }
+
+    #[test]
+    fn revision_prompts_carry_evidence_reflection_and_charter_only_when_fresh() {
+        let feedback = "Reviewer findings:\n- hardcoded value";
+        let fresh = compose_revision_prompt(&order(), 2, false, feedback);
+        assert!(
+            fresh.contains("# Worker charter"),
+            "fresh context re-briefs"
+        );
+        assert!(fresh.contains("hardcoded value"), "{fresh}");
+        assert!(fresh.contains("What exactly failed"), "{fresh}");
+
+        let resumed = compose_revision_prompt(&order(), 2, true, feedback);
+        assert!(
+            !resumed.contains("# Worker charter"),
+            "a resumed session already has the charter"
+        );
+        assert!(resumed.contains("hardcoded value"), "{resumed}");
+        assert!(resumed.contains("Revision attempt 2"), "{resumed}");
     }
 
     #[test]
