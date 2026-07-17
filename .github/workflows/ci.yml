@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: taiki-e/install-action@nextest
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # Fleet integration tests need grove >= 0.3.2 on PATH and skip
+      # themselves otherwise; install grove from git once 0.3.2 lands.
+      - run: cargo nextest run

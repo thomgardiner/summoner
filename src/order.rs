@@ -23,6 +23,12 @@ pub struct Order {
     pub timeout_secs: Option<u64>,
     pub base: Option<String>,
     pub branch: Option<String>,
+    /// Order ids that must reach `verified` or `completed` first. Ordering and
+    /// failure propagation only: a dependent still builds from its own `base`,
+    /// so an order that needs a dependency's changes says so explicitly with
+    /// `base = "grove/smn-<dep-id>"` (branch names are deterministic).
+    #[serde(default)]
+    pub after: Vec<String>,
     #[serde(skip)]
     pub source: PathBuf,
 }
@@ -45,16 +51,22 @@ pub fn load(paths: &[PathBuf]) -> Result<Vec<Order>> {
     let mut files = Vec::new();
     for path in paths {
         if path.is_dir() {
-            let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
+            let mut entries = Vec::new();
+            for entry in std::fs::read_dir(path)
                 .with_context(|| format!("reading order directory {}", path.display()))?
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.path())
-                .filter(|p| {
-                    p.is_file()
-                        && p.extension()
-                            .is_some_and(|ext| ext == "toml" || ext == "json")
-                })
-                .collect();
+            {
+                // A dropped entry would silently dispatch a subset of the batch.
+                let entry = entry
+                    .with_context(|| format!("reading an entry of {}", path.display()))?
+                    .path();
+                if entry.is_file()
+                    && entry
+                        .extension()
+                        .is_some_and(|ext| ext == "toml" || ext == "json")
+                {
+                    entries.push(entry);
+                }
+            }
             entries.sort();
             if entries.is_empty() {
                 bail!(
@@ -87,7 +99,9 @@ fn parse(path: &Path) -> Result<Order> {
             path.display()
         ),
     };
-    order.source = path.to_path_buf();
+    // Absolute: executors receive {order_file} while running from the leased
+    // worktree, where a caller-relative path would point at nothing.
+    order.source = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     Ok(order)
 }
 
@@ -125,6 +139,13 @@ pub fn validate(orders: &[Order], config: &Config) -> Vec<String> {
                 "{at}: scope must be a non-empty list of non-empty entries"
             ));
         }
+        if let Some(timeout) = order.timeout_secs
+            && !(1..=604_800).contains(&timeout)
+        {
+            problems.push(format!(
+                "{at}: timeout_secs must be between 1 and 604800 (7 days), got {timeout}"
+            ));
+        }
         match order.executor_name(config) {
             None => problems.push(format!(
                 "{at}: no executor named and no default_executor configured"
@@ -139,10 +160,63 @@ pub fn validate(orders: &[Order], config: &Config) -> Vec<String> {
         }
     }
 
+    for order in orders {
+        let at = order.source.display();
+        for dep in &order.after {
+            if dep == &order.id {
+                problems.push(format!("{at}: after references the order itself"));
+            } else if !seen_ids.contains(dep) {
+                problems.push(format!("{at}: after references unknown order {dep:?}"));
+            }
+        }
+    }
+    let cycle = cycle_members(orders);
+    if !cycle.is_empty() {
+        problems.push(format!(
+            "dependency cycle among orders: {}",
+            cycle.join(", ")
+        ));
+    }
+
     for name in used_backends {
         problems.extend(backend_problems(&name, &config.executors[&name]));
     }
     problems
+}
+
+/// Kahn's elimination: whatever cannot be topologically drained is in (or
+/// downstream of) a cycle. Unknown ids are reported separately and ignored here.
+fn cycle_members(orders: &[Order]) -> Vec<String> {
+    let ids: BTreeSet<&str> = orders.iter().map(|o| o.id.as_str()).collect();
+    let mut deps: BTreeMap<&str, BTreeSet<&str>> = orders
+        .iter()
+        .map(|order| {
+            let wanted: BTreeSet<&str> = order
+                .after
+                .iter()
+                .map(String::as_str)
+                .filter(|dep| ids.contains(dep) && *dep != order.id)
+                .collect();
+            (order.id.as_str(), wanted)
+        })
+        .collect();
+    loop {
+        let ready: Vec<&str> = deps
+            .iter()
+            .filter(|(_, wanted)| wanted.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+        if ready.is_empty() {
+            break;
+        }
+        for id in ready {
+            deps.remove(id);
+            for wanted in deps.values_mut() {
+                wanted.remove(id);
+            }
+        }
+    }
+    deps.keys().map(|id| id.to_string()).collect()
 }
 
 /// Routing and placeholders must agree, or the executor receives a literal
@@ -171,6 +245,13 @@ fn backend_problems(name: &str, backend: &ExecutorBackend) -> Vec<String> {
     if backend.prompt != PromptRouting::File && has("{prompt_file}") {
         problems.push(format!(
             "executor {name:?}: argv references {{prompt_file}} but routing is not \"file\""
+        ));
+    }
+    if let Some(timeout) = backend.timeout_secs
+        && !(1..=604_800).contains(&timeout)
+    {
+        problems.push(format!(
+            "executor {name:?}: timeout_secs must be between 1 and 604800 (7 days), got {timeout}"
         ));
     }
     problems
@@ -217,6 +298,7 @@ mod tests {
                     prompt: *routing,
                     timeout_secs: None,
                     env_required: Vec::new(),
+                    usage_marker: None,
                 },
             );
         }
@@ -328,6 +410,87 @@ acceptance = ["tests pass"]
             validate(&orders, &file_without_placeholder)[0]
                 .contains("needs a {prompt_file} placeholder")
         );
+    }
+
+    #[test]
+    fn timeouts_outside_the_sane_range_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(
+            Some("fake"),
+            &[("fake", &["fake", "{prompt}"], PromptRouting::Arg)],
+        );
+        // TOML integers cap at i64::MAX; that is still far past the range gate.
+        let path = write_order(
+            dir.path(),
+            "huge.toml",
+            "id = \"huge\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\ntimeout_secs = 9223372036854775807\n",
+        );
+        let problems = validate(&load(&[path]).unwrap(), &config);
+        assert!(
+            problems[0].contains("timeout_secs must be between"),
+            "{problems:?}"
+        );
+
+        let path = write_order(
+            dir.path(),
+            "zero.toml",
+            "id = \"zero\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\ntimeout_secs = 0\n",
+        );
+        let problems = validate(&load(&[path]).unwrap(), &config);
+        assert!(
+            problems[0].contains("timeout_secs must be between"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn after_must_reference_known_orders_without_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(
+            Some("fake"),
+            &[("fake", &["fake", "{prompt}"], PromptRouting::Arg)],
+        );
+
+        let a = write_order(
+            dir.path(),
+            "a.toml",
+            "id = \"a\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src/a.rs\"]\nafter = [\"ghost\", \"a\"]\n",
+        );
+        let problems = validate(&load(&[a]).unwrap(), &config);
+        let text = problems.join("\n");
+        assert!(
+            text.contains("references unknown order \"ghost\""),
+            "{text}"
+        );
+        assert!(text.contains("references the order itself"), "{text}");
+
+        let a = write_order(
+            dir.path(),
+            "cyc-a.toml",
+            "id = \"a\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src/a.rs\"]\nafter = [\"b\"]\n",
+        );
+        let b = write_order(
+            dir.path(),
+            "cyc-b.toml",
+            "id = \"b\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src/b.rs\"]\nafter = [\"a\"]\n",
+        );
+        let problems = validate(&load(&[a, b]).unwrap(), &config);
+        assert!(
+            problems.iter().any(|p| p.contains("dependency cycle")),
+            "{problems:?}"
+        );
+
+        let a = write_order(
+            dir.path(),
+            "ok-a.toml",
+            "id = \"a\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src/a.rs\"]\n",
+        );
+        let b = write_order(
+            dir.path(),
+            "ok-b.toml",
+            "id = \"b\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src/b.rs\"]\nafter = [\"a\"]\n",
+        );
+        assert!(validate(&load(&[a, b]).unwrap(), &config).is_empty());
     }
 
     #[test]

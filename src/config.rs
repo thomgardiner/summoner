@@ -20,6 +20,9 @@ pub struct Config {
     pub order_timeout_secs: Option<u64>,
     pub grove_bin: Option<String>,
     pub keep_failed_worktrees: Option<bool>,
+    /// Stop dispatching after this many orders fail: remaining orders report
+    /// `skipped` instead of spending executor budget on a doomed fleet.
+    pub fail_fast: Option<usize>,
     pub executors: BTreeMap<String, ExecutorBackend>,
 }
 
@@ -35,6 +38,10 @@ pub struct ExecutorBackend {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub env_required: Vec<String>,
+    /// Substring marking the executor's own usage summary in its output (for
+    /// codex, "tokens used"). The first number after the marker's last
+    /// occurrence is recorded as the order's token usage.
+    pub usage_marker: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -95,6 +102,14 @@ impl Config {
         env_bool("SUMMONER_KEEP_FAILED_WORKTREES")
             .or(self.keep_failed_worktrees)
             .unwrap_or(false)
+    }
+
+    pub fn fail_fast(&self) -> Option<usize> {
+        std::env::var("SUMMONER_FAIL_FAST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or(self.fail_fast)
+            .filter(|n| *n > 0)
     }
 }
 
@@ -177,6 +192,7 @@ fn merge(base: &mut Config, over: Config) {
     base.order_timeout_secs = over.order_timeout_secs.or(base.order_timeout_secs);
     base.grove_bin = over.grove_bin.or(base.grove_bin.take());
     base.keep_failed_worktrees = over.keep_failed_worktrees.or(base.keep_failed_worktrees);
+    base.fail_fast = over.fail_fast.or(base.fail_fast);
     // Per-name override: a repo redefining `codex` wins, while executors only
     // the global file defines stay available.
     base.executors.extend(over.executors);
@@ -230,6 +246,7 @@ mod tests {
             prompt: PromptRouting::Arg,
             timeout_secs: None,
             env_required: Vec::new(),
+            usage_marker: None,
         }
     }
 

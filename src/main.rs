@@ -6,6 +6,7 @@
 //! needing review, 2 usage or infrastructure error.
 
 mod config;
+mod events;
 mod executor;
 mod grove;
 mod init;
@@ -41,6 +42,20 @@ enum Cmd {
     Run {
         /// Order files or directories of *.toml / *.json orders.
         paths: Vec<PathBuf>,
+        /// Emit NDJSON lifecycle events on stdout as the fleet runs; the last
+        /// line is a `report` event with the complete ranked report. The same
+        /// events always land in events.jsonl in the run directory.
+        #[arg(long)]
+        stream: bool,
+    },
+    /// Re-run an earlier fleet: successful orders carry over, the rest
+    /// dispatch again on their original branches.
+    Resume {
+        /// The run id from a previous report (also its run-directory name).
+        run_id: String,
+        /// Emit NDJSON lifecycle events, as with `run --stream`.
+        #[arg(long)]
+        stream: bool,
     },
     /// Summoner-owned grove tasks (owner prefix smn-), as JSON.
     Status,
@@ -87,7 +102,8 @@ fn dispatch() -> Result<i32> {
                 Ok(2)
             }
         }
-        Cmd::Run { paths } => run::run(&config::load().config, &paths),
+        Cmd::Run { paths, stream } => run::run(&config::load().config, &paths, stream),
+        Cmd::Resume { run_id, stream } => run::resume(&config::load().config, &run_id, stream),
         Cmd::Status => {
             let resolved = config::load();
             let grove = grove::GroveCli::new(resolved.config.grove_bin());
@@ -109,9 +125,19 @@ fn dispatch() -> Result<i32> {
 #[derive(Serialize)]
 struct DoctorReport {
     grove: DoctorGrove,
+    repo: DoctorRepo,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_executor: Option<String>,
     executors: Vec<DoctorExecutor>,
+    ok: bool,
+}
+
+/// The charter tells executors to commit, so a repo without a git identity
+/// fails every order at the first commit; catch it here instead.
+#[derive(Serialize)]
+struct DoctorRepo {
+    git_repo: bool,
+    git_identity: bool,
     ok: bool,
 }
 
@@ -156,6 +182,15 @@ fn doctor(config: &config::Config) -> Result<i32> {
         },
     };
 
+    let git_repo = git_ok(&["rev-parse", "--git-dir"]);
+    let git_identity =
+        git_ok(&["config", "--get", "user.name"]) && git_ok(&["config", "--get", "user.email"]);
+    let repo = DoctorRepo {
+        git_repo,
+        git_identity,
+        ok: git_repo && git_identity,
+    };
+
     let default_executor = config.default_executor();
     let mut executors = Vec::new();
     for (name, backend) in &config.executors {
@@ -178,13 +213,17 @@ fn doctor(config: &config::Config) -> Result<i32> {
         });
     }
 
+    // No default executor is a valid setup — every order may name its own.
+    // Only a default that points at nothing is a problem.
     let default_ok = match &default_executor {
         Some(name) => config.executors.contains_key(name),
-        None => false,
+        None => true,
     };
-    let ok = grove_report.ok && default_ok && executors.iter().all(|executor| executor.ok);
+    let ok =
+        grove_report.ok && repo.ok && default_ok && executors.iter().all(|executor| executor.ok);
     let report = DoctorReport {
         grove: grove_report,
+        repo,
         default_executor,
         executors,
         ok,
@@ -193,14 +232,30 @@ fn doctor(config: &config::Config) -> Result<i32> {
     Ok(if report.ok { 0 } else { 1 })
 }
 
+fn git_ok(args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .args(args)
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
 fn on_path(binary: &str) -> bool {
     if binary.contains(std::path::MAIN_SEPARATOR) {
-        return Path::new(binary).exists();
+        return executable(Path::new(binary));
     }
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|dir| {
-            let candidate = dir.join(binary);
-            candidate.is_file()
-        })
-    })
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| executable(&dir.join(binary))))
+}
+
+/// A present-but-unexecutable file must fail doctor, not the first dispatch.
+#[cfg(unix)]
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn executable(path: &Path) -> bool {
+    path.is_file()
 }

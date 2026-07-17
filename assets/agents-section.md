@@ -16,14 +16,22 @@ lifecycle for delegated work, so prefer it over hand-driving
 3. `summoner run orders/` executes the fleet. Each order gets an isolated
    worktree, a grove task holding its scope claim, the configured executor CLI,
    then verification. Exit 0: every order verified. Exit 1: at least one order
-   needs review. Exit 2: usage or infrastructure error.
+   needs review. Exit 2: usage or infrastructure error. Add `--stream` for
+   NDJSON lifecycle events on stdout (final line: a `report` event with the
+   full report); every run also writes the same events to `events.jsonl` in
+   the run directory for live monitoring.
 4. Read the ranked JSON report (stdout, and report.json in the run directory).
    Review worst-first. Diffs live on each order's branch; verification receipts
-   and log tails are in the report. Re-dispatch failures with revised orders.
-   Never accept work from an executor's claim alone; the receipts are the
-   evidence.
+   and log tails are in the report. Re-dispatch failures with revised orders,
+   or `summoner resume <run-id>` to re-run only what did not succeed. Set
+   `fail_fast = N` in `.summoner.toml` so a doomed fleet stops early. Never
+   accept work from an executor's claim alone; the receipts are the evidence.
 
 Work order fields: `id`, `title`, `brief`, `scope` (paths or `crate:<name>`),
-`acceptance` (list), `verify_profile`, `executor`, `timeout_secs`. Executors are
+`acceptance` (list), `verify_profile`, `executor`, `timeout_secs`, `after`.
+Chain dependent work with `after = ["<id>"]`: one run executes the whole DAG,
+and dependents of failed orders come back `skipped`. The chain is ordering
+only, so an order that builds on a dependency's changes must also set
+`base = "grove/smn-<dep-id>"` (branch names are deterministic). Executors are
 argv templates in `.summoner.toml`; `summoner config` prints the resolved
 settings and their sources.

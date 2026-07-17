@@ -22,6 +22,10 @@ pub struct ExecRequest<'a> {
     pub order: &'a Order,
     pub task_id: &'a str,
     pub worktree: &'a Path,
+    /// The repository's shared .git directory. Sandboxed executors need it
+    /// writable to commit from a linked worktree (git puts the worktree's
+    /// index and locks under `<common>/worktrees/<name>/`).
+    pub git_common_dir: &'a Path,
     /// Per-order run directory: prompt.md, stdout.log, stderr.log. Never
     /// inside the worktree — an untracked out-of-scope file blocks finish.
     pub run_dir: &'a Path,
@@ -65,16 +69,20 @@ pub fn expand(
     template: &[String],
     prompt: &str,
     worktree: &Path,
+    git_common_dir: &Path,
     order_file: &Path,
     prompt_file: &Path,
 ) -> Vec<String> {
     template
         .iter()
         .map(|arg| {
-            arg.replace("{prompt}", prompt)
-                .replace("{worktree}", &worktree.display().to_string())
+            arg.replace("{worktree}", &worktree.display().to_string())
+                .replace("{git_common_dir}", &git_common_dir.display().to_string())
                 .replace("{order_file}", &order_file.display().to_string())
                 .replace("{prompt_file}", &prompt_file.display().to_string())
+                // Last, so placeholder tokens inside the prompt text are never
+                // re-scanned: the orchestrator's brief must arrive verbatim.
+                .replace("{prompt}", prompt)
         })
         .collect()
 }
@@ -92,6 +100,7 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
         &req.backend.argv,
         &prompt,
         req.worktree,
+        req.git_common_dir,
         &req.order.source,
         &prompt_path,
     );
@@ -118,16 +127,21 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
         .with_context(|| format!("spawning {}", argv[0]))?;
 
     // A writer thread: a prompt larger than the pipe buffer must not deadlock
-    // against a child that is still starting up.
-    let stdin_writer = child.stdin.take().map(|mut stdin| {
+    // against a child that is still starting up. Deliberately never joined —
+    // a rogue descendant that keeps the read end open without reading would
+    // otherwise hang this worker forever. The thread exits on EPIPE once the
+    // readers die; at worst it lingers holding one prompt string.
+    if let Some(mut stdin) = child.stdin.take() {
         std::thread::spawn(move || {
             let _ = stdin.write_all(prompt.as_bytes());
-        })
-    });
+        });
+    }
 
     // grove owns the real deadline; this fires only if the supervisor itself
-    // is broken or wedged.
-    let backup_deadline = Instant::now() + Duration::from_secs(req.timeout_secs + 30);
+    // is broken or wedged. Saturate and cap: a huge configured timeout must
+    // not overflow Instant arithmetic after the fleet is already running.
+    let backup_deadline =
+        Instant::now() + Duration::from_secs(req.timeout_secs.saturating_add(30).min(31_536_000));
     let mut terminated = false;
     let outcome = loop {
         if let Some(status) = child.try_wait().context("waiting for grove task exec")? {
@@ -152,9 +166,6 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
         }
         std::thread::sleep(Duration::from_millis(200));
     };
-    if let Some(writer) = stdin_writer {
-        let _ = writer.join();
-    }
     Ok(outcome)
 }
 
@@ -168,16 +179,18 @@ fn terminate_supervisor(child: &std::process::Child) {
 #[cfg(not(unix))]
 fn terminate_supervisor(_child: &std::process::Child) {}
 
-/// The last `limit` bytes of a log, for the report.
+/// The last `limit` bytes of a log, for the report. Seeks instead of reading
+/// the file: a runaway executor's multi-gigabyte log must not be loaded whole.
 pub fn tail(path: &Path, limit: usize) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let start = text.len().saturating_sub(limit);
-    // Snap to a char boundary so a multibyte character at the cut cannot panic.
-    let mut start = start;
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    Some(text[start..].to_string())
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(limit as u64)))
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64).read_to_end(&mut bytes).ok()?;
+    // Lossy: the seek may land mid-character; a replacement char beats a panic.
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
@@ -197,6 +210,7 @@ mod tests {
             timeout_secs: None,
             base: None,
             branch: None,
+            after: Vec::new(),
             source: PathBuf::from("orders/auth-fix.toml"),
         }
     }
@@ -223,35 +237,60 @@ mod tests {
             &template,
             "PROMPT TEXT",
             Path::new("/wt"),
+            Path::new("/repo/.git"),
             Path::new("/orders/a.toml"),
             Path::new("/runs/a/prompt.md"),
         );
         assert_eq!(argv, ["run", "--pure", "PROMPT TEXT", "--dir", "/wt"]);
 
-        let embedded: Vec<String> = ["--prompt-file={prompt_file}", "--order={order_file}"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let embedded: Vec<String> = [
+            "--prompt-file={prompt_file}",
+            "--order={order_file}",
+            "roots=[\"{git_common_dir}\"]",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let argv = expand(
             &embedded,
             "unused",
             Path::new("/wt"),
+            Path::new("/repo/.git"),
             Path::new("/orders/a.toml"),
             Path::new("/runs/a/prompt.md"),
         );
         assert_eq!(
             argv,
-            ["--prompt-file=/runs/a/prompt.md", "--order=/orders/a.toml"]
+            [
+                "--prompt-file=/runs/a/prompt.md",
+                "--order=/orders/a.toml",
+                "roots=[\"/repo/.git\"]"
+            ]
         );
+
+        // Placeholder-shaped text inside the prompt must survive verbatim,
+        // never be substituted by a later pass.
+        let template: Vec<String> = vec!["{prompt}".to_string()];
+        let argv = expand(
+            &template,
+            "keep {worktree} and {git_common_dir} literal",
+            Path::new("/wt"),
+            Path::new("/repo/.git"),
+            Path::new("/orders/a.toml"),
+            Path::new("/runs/a/prompt.md"),
+        );
+        assert_eq!(argv, ["keep {worktree} and {git_common_dir} literal"]);
     }
 
     #[test]
-    fn tail_returns_the_last_bytes_on_char_boundaries() {
+    fn tail_seeks_to_the_end_and_survives_a_mid_character_cut() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log");
         std::fs::write(&path, format!("{}é-tail", "x".repeat(100))).unwrap();
-        let tail = tail(&path, 6).unwrap();
-        assert!(tail.ends_with("-tail"));
-        assert!(tail.len() <= 6);
+        // The 6-byte window starts inside the two-byte 'é'.
+        let cut = tail(&path, 6).unwrap();
+        assert!(cut.ends_with("-tail"), "{cut:?}");
+        assert!(cut.starts_with('\u{FFFD}'), "{cut:?}");
+        assert_eq!(tail(&path, 4).unwrap(), "tail");
     }
 }

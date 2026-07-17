@@ -28,7 +28,9 @@ outcomes. Everything between is Summoner's job.
 
    Seed `scope` from `grove plan --json` `claim_scopes` when the work maps to
    packages. Tight scope and concrete acceptance criteria are what keep fast
-   models honest.
+   models honest. Dependent work chains with `after = ["<id>"]` (one run
+   executes the DAG; dependents of failures are skipped), and an order that
+   builds on a dependency's changes also sets `base = "grove/smn-<dep-id>"`.
 
 2. **Preflight.** `summoner doctor` checks every configured executor binary,
    required environment variables, and the grove version. Fix what it flags
@@ -36,7 +38,10 @@ outcomes. Everything between is Summoner's job.
 
 3. **Dispatch.** `summoner run orders/`. Orders run in parallel (config
    `max_parallel`), each in its own grove worktree and task. Mixing executors
-   (GLM, Codex, Claude, anything configured) in one run is normal.
+   (GLM, Codex, Claude, anything configured) in one run is normal. For long
+   fleets, `--stream` emits NDJSON lifecycle events as they happen (the
+   `order_dispatched` event carries the log paths to tail) and ends with a
+   `report` event instead of the pretty report.
 
 4. **Review.** The report (stdout and `report.json` in the run directory) is
    ranked worst-first: `error`, `blocked`, `stalled`, `executor_failed`,

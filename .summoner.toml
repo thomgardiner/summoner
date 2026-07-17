@@ -10,15 +10,21 @@ default_executor = "codex"
 # grove_bin              = "grove"
 
 # Executors are argv templates; summoner compiles in no vendors. Placeholders:
-#   {prompt}      the composed charter + work order (routing = "arg")
-#   {prompt_file} path to the same, written to the run dir (routing = "file")
-#   {worktree}    absolute path of the order's grove worktree
-#   {order_file}  absolute path of the original order file
+#   {prompt}         the composed charter + work order (routing = "arg")
+#   {prompt_file}    path to the same, written to the run dir (routing = "file")
+#   {worktree}       absolute path of the order's grove worktree
+#   {git_common_dir} the repository's shared .git dir; sandboxed executors need
+#                    it writable to commit from a linked worktree
+#   {order_file}     absolute path of the original order file
 # prompt routing: "arg" | "stdin" | "file". Stdin is closed for non-stdin
 # backends, so headless CLIs cannot hang waiting for input.
 
 [executors.codex]
-argv = ["codex", "exec", "-s", "workspace-write", "-C", "{worktree}", "--", "{prompt}"]
+argv = [
+  "codex", "exec", "-s", "workspace-write", "-C", "{worktree}",
+  "-c", "sandbox_workspace_write.writable_roots=[\"{git_common_dir}\"]",
+  "--", "{prompt}",
+]
 prompt = "arg"
 timeout_secs = 900
 

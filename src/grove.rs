@@ -64,7 +64,6 @@ pub struct VerifySummary {
     pub profile: String,
     pub run_id: String,
     pub passed: bool,
-    #[serde(deserialize_with = "receipt_summaries", rename = "receipts")]
     pub receipts: Vec<ReceiptSummary>,
 }
 
@@ -75,13 +74,6 @@ pub struct ReceiptSummary {
     pub exit_code: Option<i32>,
     pub passed: bool,
     pub duration_ms: Option<u64>,
-}
-
-fn receipt_summaries<'de, D>(deserializer: D) -> Result<Vec<ReceiptSummary>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Vec::<ReceiptSummary>::deserialize(deserializer)
 }
 
 #[derive(Deserialize, serde::Serialize, Default)]
@@ -109,18 +101,22 @@ impl GroveCli {
         })
     }
 
-    /// A domain call: JSON on stdout regardless of exit 0/1; no JSON is an error.
+    /// A domain call: JSON on stdout with exit 0 or 1. Any other exit is an
+    /// error even if stdout parses — a grove that printed JSON and then died
+    /// (or exited 2) did not deliver a domain outcome.
     fn domain(&self, cwd: &Path, args: &[&str]) -> Result<serde_json::Value> {
         let out = self.call(cwd, args)?;
-        match serde_json::from_str(out.stdout.trim()) {
-            Ok(value) => Ok(value),
-            Err(_) => bail!(
-                "grove {} failed (exit {}): {}",
-                args.first().copied().unwrap_or_default(),
-                out.code,
-                out.stderr.trim()
-            ),
+        if matches!(out.code, 0 | 1)
+            && let Ok(value) = serde_json::from_str(out.stdout.trim())
+        {
+            return Ok(value);
         }
+        bail!(
+            "grove {} failed (exit {}): {}",
+            args.first().copied().unwrap_or_default(),
+            out.code,
+            out.stderr.trim()
+        )
     }
 
     pub fn version(&self) -> Result<String> {

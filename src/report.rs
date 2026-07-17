@@ -36,6 +36,22 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    pub fn from_key(key: &str) -> Option<Outcome> {
+        Some(match key {
+            "error" => Outcome::Error,
+            "blocked" => Outcome::Blocked,
+            "stalled" => Outcome::Stalled,
+            "executor_failed" => Outcome::ExecutorFailed,
+            "scope_violation" => Outcome::ScopeViolation,
+            "unverified" => Outcome::Unverified,
+            "interrupted" => Outcome::Interrupted,
+            "skipped" => Outcome::Skipped,
+            "completed" => Outcome::Completed,
+            "verified" => Outcome::Verified,
+            _ => return None,
+        })
+    }
+
     pub fn key(self) -> &'static str {
         match self {
             Outcome::Error => "error",
@@ -60,6 +76,9 @@ pub struct RunReport {
     pub started_at: u64,
     pub duration_secs: u64,
     pub summary: BTreeMap<&'static str, usize>,
+    /// Sum of per-order token usage, present when any executor reported one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_tokens: Option<u64>,
     pub orders: Vec<OrderReport>,
 }
 
@@ -77,6 +96,10 @@ impl RunReport {
         for order in &orders {
             *summary.entry(order.outcome.key()).or_insert(0) += 1;
         }
+        let usage_tokens = orders
+            .iter()
+            .filter_map(|order| order.usage_tokens)
+            .reduce(|a, b| a.saturating_add(b));
         RunReport {
             schema_version: SCHEMA_VERSION,
             run_id,
@@ -84,6 +107,7 @@ impl RunReport {
             started_at,
             duration_secs,
             summary,
+            usage_tokens,
             orders,
         }
     }
@@ -128,11 +152,15 @@ pub struct OrderReport {
     pub release_error: Option<String>,
     pub acceptance: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub verify: Vec<VerifySummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish: Option<TaskVerification>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflicts: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executor_exit: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,9 +191,11 @@ impl OrderReport {
             saved_to: None,
             release_error: None,
             acceptance: order.acceptance.clone(),
+            after: order.after.clone(),
             verify: Vec::new(),
             finish: None,
             conflicts: None,
+            usage_tokens: None,
             executor_exit: None,
             stdout_log: None,
             stderr_log: None,
@@ -207,6 +237,7 @@ mod tests {
             timeout_secs: None,
             base: None,
             branch: None,
+            after: Vec::new(),
             source: std::path::PathBuf::from(format!("{id}.toml")),
         };
         let mut report = OrderReport::new(&order, "fake".into());
