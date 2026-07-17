@@ -1,0 +1,36 @@
+# Summoner configuration. `summoner config` prints the resolved values and
+# where they came from. Precedence: SUMMONER_* env > this file (found by
+# ancestor walk) > ~/.config/summoner/config.toml > defaults.
+
+default_executor = "codex"
+# max_parallel           = 2
+# default_verify_profile = "fast"
+# order_timeout_secs     = 600
+# keep_failed_worktrees  = false  # keep failed orders' worktrees for post-mortem
+# grove_bin              = "grove"
+
+# Executors are argv templates; summoner compiles in no vendors. Placeholders:
+#   {prompt}      the composed charter + work order (routing = "arg")
+#   {prompt_file} path to the same, written to the run dir (routing = "file")
+#   {worktree}    absolute path of the order's grove worktree
+#   {order_file}  absolute path of the original order file
+# prompt routing: "arg" | "stdin" | "file". Stdin is closed for non-stdin
+# backends, so headless CLIs cannot hang waiting for input.
+
+[executors.codex]
+argv = ["codex", "exec", "-s", "workspace-write", "-C", "{worktree}", "--", "{prompt}"]
+prompt = "arg"
+timeout_secs = 900
+
+[executors.glm]
+# Needs ZHIPU_API_KEY. An interactive-only export in ~/.zshrc will NOT reach
+# summoner; persist it with `opencode auth login zai` instead.
+argv = ["opencode", "run", "--pure", "--model", "zai/glm-5.2", "{prompt}", "--dir", "{worktree}"]
+prompt = "arg"
+timeout_secs = 900
+env_required = ["ZHIPU_API_KEY"]
+
+[executors.claude]
+argv = ["claude", "-p", "--dangerously-skip-permissions"]
+prompt = "stdin"
+timeout_secs = 900

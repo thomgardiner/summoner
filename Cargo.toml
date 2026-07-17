@@ -1,0 +1,28 @@
+[package]
+name = "summoner"
+version = "0.1.0"
+edition = "2024"
+description = "Fleet runner for LLM coding agents: binds work orders to executor CLIs inside grove-managed worktrees and returns one verified, ranked report."
+license = "MIT"
+
+[[bin]]
+name = "summoner"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = "symbols"
