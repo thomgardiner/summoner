@@ -4,8 +4,10 @@
 //! worktree), so touching one caps the outcome at `unverified` outright. Soft
 //! flags are suspicious-but-sometimes-legitimate patterns handed to the
 //! reviewer to confirm or refute — the "monitor the process, not just the
-//! outcome" half of the gate.
+//! outcome" half of the gate. A scan that cannot collect evidence fails the
+//! order rather than reporting a clean pass: this gate fails closed.
 
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
@@ -42,29 +44,40 @@ pub struct Tripwires {
 }
 
 /// Scan the committed and uncommitted delta since `base` in `worktree`.
-pub fn scan(worktree: &Path, base: &str) -> Tripwires {
-    let mut changed: Vec<(char, String)> = Vec::new();
-    for line in git(worktree, &["diff", "--name-status", base]).lines() {
-        // "D\tpath" — renames ("R100\told\tnew") report the destination.
-        let mut parts = line.split('\t');
-        if let (Some(status), Some(path)) = (parts.next(), parts.next_back())
-            && let Some(kind) = status.chars().next()
-        {
-            changed.push((kind, path.to_string()));
-        }
-    }
-    for line in git(worktree, &["status", "--porcelain"]).lines() {
+pub fn scan(worktree: &Path, base: &str) -> Result<Tripwires> {
+    let mut changed = changed_entries(&git(worktree, &["diff", "--name-status", base])?);
+    for line in git(worktree, &["status", "--porcelain"])?.lines() {
         if line.len() > 3 {
             let kind = if line.starts_with("??") {
                 'A'
             } else {
                 line.trim_start().chars().next().unwrap_or('M')
             };
-            changed.push((kind, line[3..].trim().to_string()));
+            // Staged renames read "old -> new"; both sides count.
+            for path in line[3..].split(" -> ") {
+                changed.push((kind, path.trim().to_string()));
+            }
         }
     }
-    let diff = git(worktree, &["diff", base]);
-    analyze(&changed, &diff)
+    let diff = git(worktree, &["diff", base])?;
+    Ok(analyze(&changed, &diff))
+}
+
+/// Parse `git diff --name-status` records. Renames and copies ("R100\told\tnew")
+/// contribute BOTH sides: renaming a protected file away is still a
+/// modification of the protected path.
+fn changed_entries(name_status: &str) -> Vec<(char, String)> {
+    let mut changed = Vec::new();
+    for line in name_status.lines() {
+        let mut parts = line.split('\t');
+        let Some(status) = parts.next().and_then(|s| s.chars().next()) else {
+            continue;
+        };
+        for path in parts {
+            changed.push((status, path.to_string()));
+        }
+    }
+    changed
 }
 
 /// Pure analysis over a change list and unified diff text.
@@ -84,33 +97,40 @@ pub fn analyze(changed: &[(char, String)], diff: &str) -> Tripwires {
         flags.insert(0, format!("protected file modified: {path}"));
     }
 
-    let added: Vec<&str> = diff
-        .lines()
-        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
-        .collect();
-    let removed: Vec<&str> = diff
-        .lines()
-        .filter(|l| l.starts_with('-') && !l.starts_with("---"))
-        .collect();
-
-    let skips = added
-        .iter()
-        .filter(|l| SKIP_MARKERS.iter().any(|m| l.contains(m)))
-        .count();
+    let mut current_file = String::new();
+    let mut skips = 0;
+    let mut asserts_added = 0usize;
+    let mut asserts_removed = 0usize;
+    let mut profile_edit = false;
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            current_file = path.to_string();
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            if SKIP_MARKERS.iter().any(|marker| line.contains(marker)) {
+                skips += 1;
+            }
+            if line.contains("assert") {
+                asserts_added += 1;
+            }
+            // Only a manifest can change the build contract; "[profile" in
+            // docs or fixtures is prose, not policy.
+            if line.contains("[profile") && current_file.ends_with("Cargo.toml") {
+                profile_edit = true;
+            }
+        } else if line.starts_with('-') && !line.starts_with("---") && line.contains("assert") {
+            asserts_removed += 1;
+        }
+    }
     if skips > 0 {
         flags.push(format!("test-skip marker(s) added: {skips}"));
     }
-
-    let asserts_added = added.iter().filter(|l| l.contains("assert")).count();
-    let asserts_removed = removed.iter().filter(|l| l.contains("assert")).count();
     if asserts_removed > asserts_added {
         flags.push(format!(
             "net assertion loss: {}",
             asserts_removed - asserts_added
         ));
     }
-
-    if added.iter().any(|l| l.contains("[profile")) {
+    if profile_edit {
         flags.push("build profile section modified".to_string());
     }
 
@@ -120,15 +140,19 @@ pub fn analyze(changed: &[(char, String)], diff: &str) -> Tripwires {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) -> String {
-    Command::new("git")
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
         .args(args)
         .current_dir(dir)
         .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-        .unwrap_or_default()
+        .with_context(|| format!("spawning git {args:?} for the tripwire scan"))?;
+    if !output.status.success() {
+        bail!(
+            "tripwire scan git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(test)]
@@ -172,7 +196,14 @@ mod tests {
     }
 
     #[test]
-    fn skip_markers_assertion_loss_and_profiles_are_counted_from_added_lines() {
+    fn renaming_a_protected_file_away_still_trips() {
+        let changed = changed_entries("R100\t.cargo/config.toml\tdocs/archive.toml\nM\tsrc/a.rs");
+        let trips = analyze(&changed, "");
+        assert_eq!(trips.protected, [".cargo/config.toml"]);
+    }
+
+    #[test]
+    fn skip_markers_assertion_loss_and_manifest_profiles_are_counted() {
         let diff = "\
 --- a/tests/t.rs
 +++ b/tests/t.rs
@@ -205,6 +236,16 @@ mod tests {
             trips.flags
         );
         assert!(trips.protected.is_empty());
+    }
+
+    #[test]
+    fn profile_text_outside_a_manifest_is_prose_not_policy() {
+        let diff = "\
++++ b/docs/tuning.md
++add [profile.release] to your Cargo.toml
+";
+        let trips = analyze(&[], diff);
+        assert!(trips.flags.is_empty(), "{:?}", trips.flags);
     }
 
     #[test]

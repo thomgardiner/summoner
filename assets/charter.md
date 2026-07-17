@@ -12,6 +12,9 @@ whole assignment. Nothing else is.
   sections, rust-toolchain.toml, .grove.toml, CARGO_TARGET_DIR, MAKEFLAGS.
 - Never invoke `grove` or `summoner`. The harness owns tasks, claims, and
   verification.
+- In a Grove-managed Rust repository, do not run `cargo` directly either.
+  Inspect and edit the assigned code; the harness runs the declared verification
+  profile after you exit.
 - Commit completed work with clear messages. Do not push.
 - The acceptance criteria are the definition of done, and verification runs
   automatically after you exit. Leave the tree passing.

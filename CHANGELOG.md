@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Planner parallelism: package/dependency couplings remain visible as advisory topology instead of becoming mandatory `after` edges, and overlapping scopes already serialized by the declared DAG no longer warn or make `plan` reject the batch.
 - Adversarial review (codex + glm): a failed worktree release now downgrades the outcome to `error` so the run cannot exit 0 nor schedule dependents on a leaked worktree.
 - Process hygiene from the same review: the stdin writer thread is no longer joined (rogue descendants could hang a worker); interrupts are observed between verification phases; a backup kill also SIGKILLs the executor's recorded process group so a wedged grove cannot leave a paid model running; worker lock poisoning no longer cascades.
 - Validation and reporting from the same review: timeouts are range-validated (1..=604800) with saturating backup arithmetic; `{order_file}` is canonicalized before executors resolve it; `{prompt}` is substituted last so placeholder-shaped text in a brief arrives verbatim; log tails seek instead of loading whole files; order-directory read errors surface; grove domain outcomes are accepted only on exit 0 or 1.

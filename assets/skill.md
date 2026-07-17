@@ -39,9 +39,11 @@ outcomes. Everything between is Summoner's job.
 
    Then refute your decomposition before spending worktrees on it:
    `summoner plan orders/` resolves every scope exactly as dispatch will and
-   reports claim conflicts (those orders WILL block), package couplings,
-   suggested execution waves, and any `after` edges the workspace demands
-   that the orders do not declare. Revise until the verdict is `clean`.
+   reports claim conflicts, package couplings, and suggested execution waves.
+   Package couplings are advisory because file-disjoint orders have isolated
+   worktrees and build lanes. Overlapping scopes need an `after` edge; an
+   overlap already ordered by the declared DAG is clean. Revise until the
+   verdict is `clean`.
 
 2. **Preflight.** `summoner doctor` checks every configured executor binary,
    required environment variables, and the grove version. Fix what it flags
@@ -62,7 +64,11 @@ outcomes. Everything between is Summoner's job.
    work is judged by an independent backend — fresh context, diff and
    requirements only — and lands as `approved` or `rejected` with findings;
    deterministic `tripwires` (deleted tests, skip markers, verification-config
-   edits) ride in each entry.
+   edits) ride in each entry. `[profiles.<name>]` config tables pick the
+   executor/reviewer matrix per orchestrator; running from Claude Code
+   auto-selects `[profiles.claude]` when it exists (or pass
+   `--profile <name>`, or pin one machine-wide with `profile = "<name>"`
+   in the global config).
    Each order carries its branch, diff stats, verification receipts, acceptance
    criteria, and log tails. Review the diff on the order's branch against its
    acceptance criteria before landing anything. Re-dispatch failures with a

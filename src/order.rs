@@ -301,6 +301,30 @@ fn cycle_members(orders: &[Order]) -> Vec<String> {
     deps.keys().map(|id| id.to_string()).collect()
 }
 
+/// Whether `downstream` is transitively ordered after `upstream`.
+pub(crate) fn depends_on(orders: &[Order], downstream: &str, upstream: &str) -> bool {
+    let by_id: BTreeMap<&str, &Order> = orders
+        .iter()
+        .map(|order| (order.id.as_str(), order))
+        .collect();
+    let mut pending = vec![downstream];
+    let mut seen = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        let Some(order) = by_id.get(id) else {
+            continue;
+        };
+        for dependency in &order.after {
+            if dependency == upstream {
+                return true;
+            }
+            if seen.insert(dependency.as_str()) {
+                pending.push(dependency);
+            }
+        }
+    }
+    false
+}
+
 /// Routing and placeholders must agree, or the executor receives a literal
 /// `{prompt}` string — or never receives the prompt at all.
 fn backend_problems(name: &str, backend: &ExecutorBackend) -> Vec<String> {
@@ -367,10 +391,15 @@ pub fn warnings(orders: &[Order], config: &Config) -> Vec<String> {
                 Some(owner)
                     if owner.claim_group.is_none() || owner.claim_group != order.claim_group =>
                 {
-                    warnings.push(format!(
-                        "orders {:?} and {:?} both claim scope {entry:?}; the later one will block",
-                        owner.id, order.id
-                    ));
+                    if !depends_on(orders, &order.id, &owner.id)
+                        && !depends_on(orders, &owner.id, &order.id)
+                    {
+                        warnings.push(format!(
+                            "orders {:?} and {:?} both claim scope {entry:?}; \
+                             add an after edge so they do not block",
+                            owner.id, order.id
+                        ));
+                    }
                 }
                 Some(_) => {}
                 None => {
@@ -744,5 +773,25 @@ acceptance = ["tests pass"]
         let warnings = warnings(&orders, &config);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("both claim scope \"crate:auth-core\""));
+    }
+
+    #[test]
+    fn ordered_overlapping_scopes_do_not_warn() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_order(dir.path(), "a.toml", GOOD_TOML);
+        let b = write_order(
+            dir.path(),
+            "b.toml",
+            "id = \"other\"\ntitle = \"t\"\nbrief = \"b\"\n\
+             scope = [\"crate:auth-core\"]\nafter = [\"auth-fix\"]\n",
+        );
+        let orders = load(&[a, b]).unwrap();
+        let config = config_with(
+            Some("fake"),
+            &[("fake", &["fake", "{prompt}"], PromptRouting::Arg)],
+        );
+
+        assert!(validate(&orders, &config).is_empty());
+        assert!(warnings(&orders, &config).is_empty());
     }
 }

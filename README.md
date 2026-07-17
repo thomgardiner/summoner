@@ -57,7 +57,7 @@ Order IDs must match `[a-z0-9_-]+`. Scope entries are passed to grove and may be
 summoner check orders/
 ```
 
-Before dispatching a batch, analyze it: `summoner plan orders/` resolves every scope exactly as dispatch will and reports claim conflicts, package couplings from the workspace dependency graph, suggested execution waves, and any `after` edges the orders should declare but do not (`grove plan --topology` prints the package map to decompose against in the first place). Exit 0 means the batch is clean as written.
+Before dispatching a batch, analyze it: `summoner plan orders/` resolves every scope exactly as dispatch will and reports claim conflicts, package couplings from the workspace dependency graph, and suggested execution waves (`grove plan --topology` prints the package map to decompose against in the first place). Package couplings are advisory because file-disjoint orders run in isolated worktrees and build lanes. An overlapping scope requires an `after` edge; an overlap already ordered by the declared DAG is clean. Exit 0 means the batch is dispatchable as written.
 
 ### 4. Run the fleet
 
@@ -69,13 +69,28 @@ Summoner validates all orders before dispatch, runs up to the configured concurr
 
 ### 5. Read the report
 
-The same JSON is saved as `report.json` under `$XDG_CACHE_HOME/summoner/runs/<run-id>/`, or under the equivalent home-cache or temporary directory fallback. Every run also appends lifecycle events (`run_started`, `order_started`, `order_dispatched`, `order_exec_done`, `order_verify`, `order_finished`, `run_finished`) to `events.jsonl` in that directory; `summoner run --stream` mirrors them to stdout as NDJSON, ending with a single `report` event carrying the complete ranked report, so any consumer — an orchestrating session, an IDE, `tail -f` — can watch a fleet live. The `order_dispatched` event names the grove task, worktree, and log paths to follow.
+The same JSON is saved as `report.json` under `$XDG_CACHE_HOME/summoner/runs/<run-id>/`, or under the equivalent home-cache or temporary directory fallback. Every run also appends lifecycle events (`run_started`, `order_started`, `order_dispatched`, `order_exec_done`, `order_verify`, `review_started`, `order_review`, `order_finished`, `run_finished`) to `events.jsonl` in that directory; `summoner run --stream` mirrors them to stdout as NDJSON, ending with a single `report` event carrying the complete ranked report, so any consumer — an orchestrating session, an IDE, `tail -f` — can watch a fleet live. The `order_dispatched` event names the grove task, worktree, and log paths to follow, and `review_started` names the reviewer's logs so the gate is tailable the moment it spawns.
 
 Fleet control: `fail_fast = N` in `.summoner.toml` skips the remaining queue after N orders fail. An executor with a `usage_marker` (codex prints `tokens used`) gets its token count recorded per order and summed per run. `summoner resume <run-id>` re-runs an earlier fleet: orders that reached `verified`, `approved`, or `completed` carry over, and the rest dispatch again on their original branches, continuing from whatever grove salvaged. Orders are ranked worst-first, with ties sorted by ID. Review non-green outcomes, log tails, diffs, conflicts, and verification receipts before accepting executor work. `summoner status` prints Summoner-owned grove tasks as JSON.
 
 ## Review gate
 
-Set `default_reviewer = "<executor name>"` (or per-order `reviewer`; `reviewer = "none"` opts an order out) and every order that verifies is judged by an independent reviewer before it counts as green. The reviewer is any configured executor, spawned fresh in the order's worktree under the same grove supervision, prompted with the review charter, the order's brief and acceptance criteria, and the diff — deliberately never the implementing executor's transcript, and ideally a different vendor than the implementer (summoner warns when they match). Its last output line must be `{"verdict":"approve"|"reject","findings":[...]}`. Approve upgrades `verified` to `approved`; reject lands the order as `rejected` with the findings in the report (the work stays finished and salvaged on its branch for re-dispatch). A reviewer that modifies the worktree has its writes undone and its verdict voided (`review_failed`). Configure reviewer CLIs read-only (tool allowlists, read-only sandbox modes); the gate enforces it after the fact.
+Set `default_reviewer = "<executor name>"` (or per-order `reviewer`; `reviewer = "none"` opts an order out) and every order that verifies is judged by an independent reviewer before it counts as green. The reviewer is any configured executor, spawned fresh in the order's worktree under the same grove supervision, prompted with the review charter, the order's brief and acceptance criteria, and the live diff since base (staged and unstaged included, untracked files listed) — deliberately never the implementing executor's transcript, and ideally a different vendor than the implementer (summoner warns when they match). Its last output line must be `{"verdict":"approve"|"reject","findings":[...]}`. Approve upgrades `verified` to `approved`; reject lands the order as `rejected` with the findings in the report (the work stays finished and salvaged on its branch for re-dispatch). A reviewer that modifies the worktree has its writes undone and its verdict voided (`review_failed`). Configure reviewer CLIs read-only (tool allowlists, read-only sandbox modes); the gate enforces it after the fact.
+
+## Orchestrator profiles
+
+Different orchestrators want different vendor matrices: when Claude Code drives the fleet you likely want codex implementing and reviewing (and vice versa), so no vendor judges its own work and no subscription is double-billed for both orchestration and execution. Declare the matrix once:
+
+```toml
+[profiles.claude]          # when Claude Code invokes summoner
+default_reviewer = "codex-review"
+
+[profiles.codex]           # when codex invokes summoner
+default_executor = "claude"
+default_reviewer = "claude-review"
+```
+
+A profile only overrides `default_executor` and `default_reviewer`; executors stay shared. Profiles defined in the global config apply machine-wide, and a repo's `.summoner.toml` may add or override same-named profiles. Selection, highest first: `summoner run --profile <name>`, then `SUMMONER_PROFILE`, then a `profile = "<name>"` pin in config ("always use this matrix"; a global pin covers the machine, a repo pin overrides it), then auto-detection from the invoking harness's environment markers (`CLAUDECODE` selects `claude`, `CODEX_SANDBOX` selects `codex`). Auto-detection applies only when the config defines a matching profile, so it is inert until you opt in. Nested harnesses (codex spawned from a Claude Code shell, or the reverse) leave both markers, which is ambiguous: detection then selects nothing and summoner says so on stderr — use a pin, the flag, or the env variable in nested setups. Naming a profile that does not exist, whether by flag, env, or pin, is an error. `summoner config` lists the applied profile in `sources`.
 
 Anti-reward-hacking runs before the reviewer does: summoner scans the diff deterministically and reports `tripwires` per order — deleted test files, added skip markers (`#[ignore]`, `.skip(`), net assertion loss, Cargo `[profile]` edits. Touching verification config itself (`.grove.toml`, `.summoner.toml`, `rust-toolchain*`, `.cargo/config*`) is a hard stop: the receipts a modified config produces are untrustworthy, so the order lands `unverified` and its task is abandoned, whatever the tests said.
 

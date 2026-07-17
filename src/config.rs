@@ -28,6 +28,25 @@ pub struct Config {
     /// `skipped` instead of spending executor budget on a doomed fleet.
     pub fail_fast: Option<usize>,
     pub executors: BTreeMap<String, ExecutorBackend>,
+    /// Pin a profile by name: "always use this matrix here". Global config
+    /// pins the whole machine; a repo file overrides the pin. The `--profile`
+    /// flag and `SUMMONER_PROFILE` still win over a pin.
+    pub profile: Option<String>,
+    /// Orchestrator profiles: who is invoking summoner decides which
+    /// sub-agents implement and which backend reviews. Selected by
+    /// `--profile <name>`, `SUMMONER_PROFILE`, the `profile` pin above, or
+    /// auto-detected from the harness's environment markers (CLAUDECODE ->
+    /// "claude", CODEX_HOME/CODEX_SANDBOX -> "codex").
+    pub profiles: BTreeMap<String, Profile>,
+}
+
+/// One orchestrator's defaults. Executors themselves stay shared; a profile
+/// only picks among them, so the cross-vendor matrix lives in one file.
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub default_executor: Option<String>,
+    pub default_reviewer: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -208,6 +227,80 @@ fn merge(base: &mut Config, over: Config) {
     // Per-name override: a repo redefining `codex` wins, while executors only
     // the global file defines stay available.
     base.executors.extend(over.executors);
+    base.profile = over.profile.or(base.profile.take());
+    base.profiles.extend(over.profiles);
+}
+
+/// Which profile this invocation selects: an explicit flag, then the
+/// `SUMMONER_PROFILE` environment, then the config's `profile` pin (repo
+/// over global), then harness auto-detection. Explicit choices must exist;
+/// a detected profile is best-effort and only applies when the config
+/// actually defines it.
+pub fn select_profile(config: &mut Config, flag: Option<&str>) -> anyhow::Result<Option<String>> {
+    let env = std::env::var("SUMMONER_PROFILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let explicit = flag
+        .map(String::from)
+        .or(env)
+        .or_else(|| config.profile.clone());
+    let name = match explicit {
+        Some(name) => {
+            if !config.profiles.contains_key(&name) {
+                anyhow::bail!(
+                    "profile {name:?} is not defined (configured profiles: {})",
+                    if config.profiles.is_empty() {
+                        "none".to_string()
+                    } else {
+                        config
+                            .profiles
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                );
+            }
+            name
+        }
+        None => {
+            let has = |var: &str| std::env::var_os(var).is_some();
+            if has("CLAUDECODE") && has("CODEX_SANDBOX") && !config.profiles.is_empty() {
+                eprintln!(
+                    "summoner: both CLAUDECODE and CODEX_SANDBOX are set (nested harnesses); \
+                     profile detection is ambiguous — pass --profile, set SUMMONER_PROFILE, \
+                     or pin profile = \"<name>\" in config"
+                );
+            }
+            match detect_orchestrator(has).filter(|name| config.profiles.contains_key(*name)) {
+                Some(name) => name.to_string(),
+                None => return Ok(None),
+            }
+        }
+    };
+    let profile = config.profiles[&name].clone();
+    if let Some(executor) = profile.default_executor {
+        config.default_executor = Some(executor);
+    }
+    if let Some(reviewer) = profile.default_reviewer {
+        config.default_reviewer = Some(reviewer);
+    }
+    Ok(Some(name))
+}
+
+/// Well-known environment markers the harnesses leave on their shells. Only
+/// a fallback for picking a profile name; explicit selection always wins.
+/// Nested harnesses (codex spawned from a Claude Code shell, or the reverse)
+/// leave BOTH markers, and presence cannot say which is innermost — guessing
+/// silently picks the wrong vendor matrix, so ambiguity selects nothing.
+/// CODEX_HOME is deliberately not a signal: it is a config variable users
+/// export in dotfiles far outside any codex session.
+fn detect_orchestrator(has_var: impl Fn(&str) -> bool) -> Option<&'static str> {
+    match (has_var("CLAUDECODE"), has_var("CODEX_SANDBOX")) {
+        (true, false) => Some("claude"),
+        (false, true) => Some("codex"),
+        _ => None,
+    }
 }
 
 pub fn load() -> Resolved {
@@ -335,6 +428,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.executors["plain"].prompt, PromptRouting::Arg);
+    }
+
+    #[test]
+    fn profiles_overlay_defaults_and_unknown_explicit_profiles_error() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+            default_executor = "glm"
+            default_reviewer = "codex-review"
+
+            [profiles.codex]
+            default_reviewer = "claude-review"
+            "#,
+        )
+        .unwrap();
+
+        // Explicit selection overlays only what the profile sets.
+        let name = select_profile(&mut cfg, Some("codex")).unwrap();
+        assert_eq!(name.as_deref(), Some("codex"));
+        assert_eq!(cfg.default_executor.as_deref(), Some("glm"));
+        assert_eq!(cfg.default_reviewer.as_deref(), Some("claude-review"));
+
+        // Asking for a profile that does not exist is a hard error, not a
+        // silent fall-through to the wrong vendor matrix.
+        let error = select_profile(&mut cfg, Some("ghost")).unwrap_err();
+        assert!(error.to_string().contains("ghost"), "{error}");
+        assert!(error.to_string().contains("codex"), "{error}");
+    }
+
+    #[test]
+    fn a_config_pin_selects_machine_wide_and_the_flag_still_wins() {
+        let toml = r#"
+            profile = "codex"
+
+            [profiles.codex]
+            default_reviewer = "claude-review"
+
+            [profiles.claude]
+            default_reviewer = "codex-review"
+        "#;
+        // The pin applies with no flag, no env, no harness marker needed.
+        let mut cfg: Config = toml::from_str(toml).unwrap();
+        let name = select_profile(&mut cfg, None).unwrap();
+        assert_eq!(name.as_deref(), Some("codex"));
+        assert_eq!(cfg.default_reviewer.as_deref(), Some("claude-review"));
+
+        // An explicit flag overrides the pin.
+        let mut cfg: Config = toml::from_str(toml).unwrap();
+        let name = select_profile(&mut cfg, Some("claude")).unwrap();
+        assert_eq!(name.as_deref(), Some("claude"));
+        assert_eq!(cfg.default_reviewer.as_deref(), Some("codex-review"));
+
+        // A pin naming a missing profile is explicit, so it errors loudly.
+        let mut cfg: Config = toml::from_str("profile = \"ghost\"").unwrap();
+        assert!(select_profile(&mut cfg, None).is_err());
+
+        // A repo pin overrides a global pin.
+        let mut global: Config = toml::from_str(toml).unwrap();
+        let repo: Config = toml::from_str("profile = \"claude\"").unwrap();
+        merge(&mut global, repo);
+        let name = select_profile(&mut global, None).unwrap();
+        assert_eq!(name.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn orchestrators_are_detected_from_harness_markers() {
+        let env = |vars: &'static [&'static str]| move |name: &str| vars.contains(&name);
+        assert_eq!(detect_orchestrator(env(&["CLAUDECODE"])), Some("claude"));
+        assert_eq!(detect_orchestrator(env(&["CODEX_SANDBOX"])), Some("codex"));
+        // Both markers = nested harnesses; presence cannot say which is
+        // innermost, and a wrong guess silently swaps the vendor matrix.
+        assert_eq!(
+            detect_orchestrator(env(&["CLAUDECODE", "CODEX_SANDBOX"])),
+            None
+        );
+        // CODEX_HOME is a config variable, not proof of a codex session.
+        assert_eq!(detect_orchestrator(env(&["CODEX_HOME"])), None);
+        assert_eq!(detect_orchestrator(env(&["PATH"])), None);
     }
 
     #[test]

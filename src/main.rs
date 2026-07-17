@@ -26,6 +26,12 @@ use std::path::{Path, PathBuf};
 #[derive(Parser)]
 #[command(name = "summoner", version)]
 struct Cli {
+    /// Orchestrator profile from `[profiles.<name>]` in the config: picks the
+    /// default executor and reviewer for whoever is invoking summoner. Also
+    /// selectable via SUMMONER_PROFILE; auto-detected from harness
+    /// environment markers when neither is given.
+    #[arg(long, global = true)]
+    profile: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -89,7 +95,15 @@ fn main() {
 }
 
 fn dispatch() -> Result<i32> {
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    let resolved = || -> Result<config::Resolved> {
+        let mut resolved = config::load();
+        if let Some(name) = config::select_profile(&mut resolved.config, cli.profile.as_deref())? {
+            resolved.sources.push(format!("profile {name}"));
+        }
+        Ok(resolved)
+    };
+    match cli.cmd {
         Cmd::Init { global } => {
             let report = if global {
                 init::init_global()?
@@ -100,11 +114,11 @@ fn dispatch() -> Result<i32> {
             Ok(0)
         }
         Cmd::Config => {
-            println!("{}", serde_json::to_string_pretty(&config::load())?);
+            println!("{}", serde_json::to_string_pretty(&resolved()?)?);
             Ok(0)
         }
         Cmd::Check { paths } => {
-            let resolved = config::load();
+            let resolved = resolved()?;
             let orders = order::load(&paths)?;
             for warning in order::warnings(&orders, &resolved.config) {
                 eprintln!("summoner: warning: {warning}");
@@ -120,11 +134,11 @@ fn dispatch() -> Result<i32> {
                 Ok(2)
             }
         }
-        Cmd::Plan { paths } => plan::plan(&config::load().config, &paths),
-        Cmd::Run { paths, stream } => run::run(&config::load().config, &paths, stream),
-        Cmd::Resume { run_id, stream } => run::resume(&config::load().config, &run_id, stream),
+        Cmd::Plan { paths } => plan::plan(&resolved()?.config, &paths),
+        Cmd::Run { paths, stream } => run::run(&resolved()?.config, &paths, stream),
+        Cmd::Resume { run_id, stream } => run::resume(&resolved()?.config, &run_id, stream),
         Cmd::Status => {
-            let resolved = config::load();
+            let resolved = resolved()?;
             let grove = grove::GroveCli::new(resolved.config.grove_bin());
             let mut status = grove.task_status(&std::env::current_dir()?)?;
             if let Some(tasks) = status.get_mut("tasks").and_then(|t| t.as_array_mut()) {
@@ -137,7 +151,7 @@ fn dispatch() -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&status)?);
             Ok(0)
         }
-        Cmd::Doctor => doctor(&config::load().config),
+        Cmd::Doctor => doctor(&resolved()?.config),
     }
 }
 

@@ -8,7 +8,7 @@ use crate::grove::GroveCli;
 use crate::order::{self, Order};
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[derive(Serialize)]
@@ -37,18 +37,24 @@ pub fn plan(config: &Config, paths: &[PathBuf]) -> Result<i32> {
     let orders = order::load(paths)?;
     let problems = order::validate(&orders, config);
 
+    // Variant siblings carry their claim group so grove's partition treats
+    // their deliberate overlap as a race, not a conflict — exactly as the
+    // claim registry will at dispatch.
     let sets: Vec<serde_json::Value> = orders
         .iter()
-        .map(|order| serde_json::json!({"id": order.id, "scope": order.scope}))
+        .map(|order| {
+            serde_json::json!({
+                "id": order.id,
+                "scope": order.scope,
+                "group": order.claim_group,
+            })
+        })
         .collect();
     let repo = std::env::current_dir().context("resolving current directory")?;
     let partition = grove.partition(&repo, &serde_json::Value::Array(sets))?;
 
     let missing_after = missing_after(&orders, &partition);
-    let conflicts = partition["conflicts"]
-        .as_array()
-        .is_some_and(|c| !c.is_empty());
-    let clean = problems.is_empty() && missing_after.is_empty() && !conflicts;
+    let clean = problems.is_empty() && missing_after.is_empty();
     let report = PlanReport {
         verdict: if clean { "clean" } else { "revise" },
         problems,
@@ -59,39 +65,31 @@ pub fn plan(config: &Config, paths: &[PathBuf]) -> Result<i32> {
     Ok(if clean { 0 } else { 1 })
 }
 
-/// Which suggested edges the order files do not already declare. Declared
-/// extras are left alone: an orchestrator may know ordering reasons the
-/// package graph cannot see.
+/// Scope conflicts that are not already serialized by the declared DAG.
+/// Package couplings remain advisory: isolated worktrees and build lanes make
+/// file-disjoint orders safe to execute in parallel.
 fn missing_after(orders: &[Order], partition: &serde_json::Value) -> Vec<MissingAfter> {
-    let declared: std::collections::BTreeMap<&str, BTreeSet<&str>> = orders
-        .iter()
-        .map(|order| {
-            (
-                order.id.as_str(),
-                order.after.iter().map(String::as_str).collect(),
-            )
-        })
-        .collect();
-    let Some(suggested) = partition["suggested_after"].as_array() else {
+    let Some(conflicts) = partition["conflicts"].as_array() else {
         return Vec::new();
     };
-    suggested
-        .iter()
-        .filter_map(|edge| {
-            let id = edge["id"].as_str()?;
-            let empty = BTreeSet::new();
-            let have = declared.get(id).unwrap_or(&empty);
-            let missing: Vec<String> = edge["after"]
-                .as_array()?
-                .iter()
-                .filter_map(|dep| dep.as_str())
-                .filter(|dep| !have.contains(dep))
-                .map(String::from)
-                .collect();
-            (!missing.is_empty()).then(|| MissingAfter {
-                id: id.to_string(),
-                missing,
-            })
+    let mut missing: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for conflict in conflicts {
+        let (Some(a), Some(b)) = (conflict["a"].as_str(), conflict["b"].as_str()) else {
+            continue;
+        };
+        if crate::order::depends_on(orders, a, b) || crate::order::depends_on(orders, b, a) {
+            continue;
+        }
+        missing
+            .entry(b.to_string())
+            .or_default()
+            .insert(a.to_string());
+    }
+    missing
+        .into_iter()
+        .map(|(id, dependencies)| MissingAfter {
+            id,
+            missing: dependencies.into_iter().collect(),
         })
         .collect()
 }
@@ -123,11 +121,12 @@ mod tests {
     }
 
     #[test]
-    fn declared_edges_satisfy_suggestions_and_missing_ones_surface() {
+    fn declared_edges_satisfy_conflicts_and_missing_ones_surface() {
         let partition = serde_json::json!({
-            "suggested_after": [
-                {"id": "app", "after": ["core", "util"]},
-                {"id": "docs", "after": ["app"]},
+            "conflicts": [
+                {"a": "core", "b": "app", "overlap": ["src/a.rs"]},
+                {"a": "util", "b": "app", "overlap": ["src/b.rs"]},
+                {"a": "app", "b": "docs", "overlap": ["src/c.rs"]}
             ]
         });
         let orders = [
@@ -140,5 +139,61 @@ mod tests {
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].id, "app");
         assert_eq!(missing[0].missing, ["util"]);
+    }
+
+    #[test]
+    fn package_couplings_are_advisory() {
+        let partition = serde_json::json!({
+            "couplings": [
+                {
+                    "upstream": "core",
+                    "downstream": "app",
+                    "kind": "dependency",
+                    "via": ["core"]
+                },
+                {
+                    "upstream": "left",
+                    "downstream": "right",
+                    "kind": "same_package",
+                    "via": ["one-crate"]
+                }
+            ],
+            "suggested_after": [
+                {"id": "app", "after": ["core"]},
+                {"id": "right", "after": ["left"]}
+            ],
+            "conflicts": []
+        });
+        let orders = [
+            order("core", &[]),
+            order("app", &[]),
+            order("left", &[]),
+            order("right", &[]),
+        ];
+
+        assert!(missing_after(&orders, &partition).is_empty());
+    }
+
+    #[test]
+    fn ordered_scope_conflict_needs_no_additional_edge() {
+        let partition = serde_json::json!({
+            "conflicts": [{"a": "base", "b": "followup", "overlap": ["src/lib.rs"]}]
+        });
+        let orders = [order("base", &[]), order("followup", &["base"])];
+
+        assert!(missing_after(&orders, &partition).is_empty());
+    }
+
+    #[test]
+    fn unordered_scope_conflict_requires_an_edge() {
+        let partition = serde_json::json!({
+            "conflicts": [{"a": "base", "b": "followup", "overlap": ["src/lib.rs"]}]
+        });
+        let orders = [order("base", &[]), order("followup", &[])];
+
+        let missing = missing_after(&orders, &partition);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].id, "followup");
+        assert_eq!(missing[0].missing, ["base"]);
     }
 }

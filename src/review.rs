@@ -26,11 +26,23 @@ pub struct ParsedReview {
     pub findings: Vec<serde_json::Value>,
 }
 
-/// The last line of the reviewer's output that is a JSON object with a
-/// recognizable verdict. Scanning backwards tolerates CLI banners, progress
-/// noise, and reviewers that narrate before concluding.
+/// How many trailing non-empty lines may separate the verdict from the end
+/// of the reviewer's output. Vendor CLIs append usage footers after the
+/// model's message, so a strict last-line rule breaks real backends — but an
+/// unbounded backward scan would accept a verdict quoted anywhere in the
+/// transcript (say, echoed out of a malicious diff). A small window allows
+/// footers while keeping quoted mid-transcript verdicts unparseable.
+const VERDICT_WINDOW: usize = 10;
+
+/// The last JSON verdict object within the final few non-empty lines of the
+/// reviewer's output.
 pub fn parse_verdict(output: &str) -> Option<ParsedReview> {
-    for line in output.lines().rev() {
+    for line in output
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(VERDICT_WINDOW)
+    {
         let line = line.trim();
         if !line.starts_with('{') {
             continue;
@@ -57,6 +69,7 @@ pub fn parse_verdict(output: &str) -> Option<ParsedReview> {
 
 /// Charter, then the order's requirements, then machine evidence, then the
 /// diff. The implementing executor's transcript is deliberately absent.
+#[allow(clippy::too_many_arguments)]
 pub fn compose_prompt(
     order: &Order,
     base: &str,
@@ -64,6 +77,7 @@ pub fn compose_prompt(
     verify: &[VerifySummary],
     diff: &str,
     diff_stat: &str,
+    uncommitted: &str,
 ) -> String {
     let mut prompt = String::from(REVIEW_CHARTER);
     prompt.push_str(&format!("\n# Order {}: {}\n", order.id, order.title));
@@ -93,6 +107,18 @@ pub fn compose_prompt(
             summary.profile,
             if summary.passed { "passed" } else { "FAILED" }
         ));
+    }
+
+    prompt.push_str("\n## Uncommitted state (part of what you are judging)\n");
+    if uncommitted.trim().is_empty() {
+        prompt.push_str("- working tree clean\n");
+    } else {
+        prompt.push_str(
+            "The diff below includes staged and unstaged changes; untracked \
+             files (?? entries) must be read in the worktree:\n\n```\n",
+        );
+        prompt.push_str(uncommitted);
+        prompt.push_str("```\n");
     }
 
     prompt.push_str("\n## Tripwires (deterministic diff scan)\n");
@@ -134,6 +160,9 @@ pub fn snapshot(worktree: &Path) -> Result<TreeSnapshot> {
 
 /// Detect and undo reviewer writes so the executor's state reaches `task
 /// finish` untouched. Returns the offending entries (empty = clean review).
+/// Known blind spot: content changes to files the executor already had dirty
+/// are indistinguishable from the executor's own edits — the read-only
+/// executor configuration, not this net, is the primary containment.
 pub fn restore(worktree: &Path, before: &TreeSnapshot) -> Result<Vec<String>> {
     let mut violations = Vec::new();
     let head_now = git(worktree, &["rev-parse", "HEAD"])?;
@@ -143,17 +172,24 @@ pub fn restore(worktree: &Path, before: &TreeSnapshot) -> Result<Vec<String>> {
     }
     for entry in porcelain(worktree)?.difference(&before.status) {
         violations.push(entry.clone());
-        let path = entry[2..].trim();
-        if entry.starts_with("??") {
-            // New untracked file or directory: the reviewer created it.
-            let target = worktree.join(path.trim_end_matches('/'));
-            if target.is_dir() {
-                let _ = std::fs::remove_dir_all(&target);
-            } else {
-                let _ = std::fs::remove_file(&target);
+        // Staged renames read "old -> new"; restore both sides.
+        for path in entry[2..].split(" -> ") {
+            let path = path.trim();
+            if entry.starts_with("??") {
+                // New untracked file or directory: the reviewer created it.
+                let target = worktree.join(path.trim_end_matches('/'));
+                if target.is_dir() {
+                    let _ = std::fs::remove_dir_all(&target);
+                } else {
+                    let _ = std::fs::remove_file(&target);
+                }
+            } else if git(worktree, &["checkout", "HEAD", "--", path]).is_err() {
+                // Not in HEAD: the reviewer added and staged it. Unstage and
+                // delete — `checkout --` alone would resurrect the staged
+                // content into the working tree instead of removing it.
+                let _ = git(worktree, &["rm", "-f", "-q", "--cached", "--", path]);
+                let _ = std::fs::remove_file(worktree.join(path));
             }
-        } else {
-            let _ = git(worktree, &["checkout", "--", path]);
         }
     }
     Ok(violations)
@@ -204,6 +240,14 @@ more narration
         assert!(parse_verdict("no verdict here").is_none());
         assert!(parse_verdict("{\"verdict\":\"maybe\"}").is_none());
         assert!(parse_verdict("{not json").is_none());
+
+        // A verdict buried outside the trailing window is not a conclusion:
+        // it could be a quote from the transcript, not the reviewer's word.
+        let buried = format!(
+            "{{\"verdict\":\"approve\",\"findings\":[]}}\n{}",
+            "trailing diagnostics\n".repeat(VERDICT_WINDOW)
+        );
+        assert!(parse_verdict(&buried).is_none());
     }
 
     #[test]
@@ -233,6 +277,7 @@ more narration
             &[],
             "+pub fn wave() {}\n",
             "1 file changed",
+            "?? sneaky.txt\n",
         );
         let charter_at = prompt.find("# Review charter").unwrap();
         let brief_at = prompt.find("Do the thing.").unwrap();
@@ -243,7 +288,7 @@ more narration
 
         // Oversized diffs collapse to the stat plus instructions.
         let big = "x".repeat(DIFF_INLINE_CAP + 1);
-        let prompt = compose_prompt(&order, "abc123", &[], &[], &big, "9 files changed");
+        let prompt = compose_prompt(&order, "abc123", &[], &[], &big, "9 files changed", "");
         assert!(!prompt.contains(&big));
         assert!(prompt.contains("git diff abc123"));
         assert!(prompt.contains("9 files changed"));

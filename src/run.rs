@@ -61,9 +61,13 @@ pub fn resume(config: &Config, run_id: &str, stream: bool) -> Result<i32> {
     )
     .context("parsing the prior run report")?;
     let prior_orders = prior["orders"].as_array().cloned().unwrap_or_default();
+    // Deduplicate: variant siblings all report the original order file, and
+    // loading it twice would expand duplicate sibling ids that fail validation.
+    let mut seen_files = std::collections::BTreeSet::new();
     let files: Vec<PathBuf> = prior_orders
         .iter()
         .filter_map(|entry| entry["order_file"].as_str().map(PathBuf::from))
+        .filter(|path| seen_files.insert(path.clone()))
         .collect();
     if files.is_empty() {
         bail!("run {run_id} names no order files to resume");
@@ -459,9 +463,11 @@ fn drive(ctx: &Ctx, order: &Order, executor_name: &str, report: &mut OrderReport
 
     // Deterministic anti-hacking scan before any evidence is trusted. A
     // modified verification config invalidates the receipts it would produce,
-    // so that is a hard stop; soft flags ride along to the reviewer.
+    // so that is a hard stop; soft flags ride along to the reviewer. A scan
+    // that cannot collect evidence propagates as `error`: the gate never
+    // reports a clean pass it did not perform.
     let base = report.base_commit.clone().unwrap_or_else(|| "HEAD".into());
-    let trips = tripwires::scan(&worktree, &base);
+    let trips = tripwires::scan(&worktree, &base)?;
     report.tripwires = trips.flags.clone();
     if !trips.protected.is_empty() {
         report.outcome = Outcome::Unverified;
@@ -719,9 +725,15 @@ fn review_gate(
     let timeout_secs = backend
         .timeout_secs
         .unwrap_or_else(|| ctx.config.order_timeout_secs());
-    let range = format!("{base}..HEAD");
-    let diff = git(worktree, &["diff", &range]).unwrap_or_default();
-    let diff_stat = git(worktree, &["diff", "--stat", &range]).unwrap_or_default();
+    // The live delta, not base..HEAD: verification ran against this tree, so
+    // the reviewer must judge everything in it — staged, unstaged, and (via
+    // the status listing) untracked. A diff the gate cannot collect is an
+    // error, never an empty diff silently approved.
+    let diff = git(worktree, &["diff", base]).context("collecting the review diff")?;
+    let diff_stat =
+        git(worktree, &["diff", "--stat", base]).context("collecting the review diff stat")?;
+    let uncommitted = git(worktree, &["status", "--porcelain"])
+        .context("collecting the review status listing")?;
     let prompt = review::compose_prompt(
         order,
         base,
@@ -729,8 +741,22 @@ fn review_gate(
         &report.verify,
         &diff,
         &diff_stat,
+        &uncommitted,
     );
     let before = review::snapshot(worktree)?;
+    let stdout_log = order_dir.join("review-stdout.log");
+    // Reviews run for minutes; a live consumer needs the logs to tail the
+    // moment the reviewer spawns, not a verdict event after the fact.
+    ctx.events.emit(
+        "review_started",
+        serde_json::json!({
+            "id": order.id,
+            "reviewer": reviewer,
+            "stdout_log": stdout_log.display().to_string(),
+            "stderr_log": order_dir.join("review-stderr.log").display().to_string(),
+            "timeout_secs": timeout_secs,
+        }),
+    );
     let started = Instant::now();
     let exec = executor::run_executor(&ExecRequest {
         grove: &ctx.grove,
@@ -745,7 +771,6 @@ fn review_gate(
         prompt: &prompt,
         file_prefix: "review-",
     })?;
-    let stdout_log = order_dir.join("review-stdout.log");
     let mut summary = ReviewSummary {
         reviewer: reviewer.to_string(),
         verdict: "failed".into(),
@@ -767,10 +792,15 @@ fn review_gate(
     {
         report.usage_tokens = Some(report.usage_tokens.unwrap_or(0).saturating_add(extra));
     }
+    // A wedged supervisor can leave the reviewer's group alive and still
+    // writing; kill it BEFORE undoing worktree state, or the restoration
+    // races the very process it is cleaning up after.
+    if exec.backup_killed {
+        kill_recorded_group(ctx, task_id, worktree);
+    }
     let violations = review::restore(worktree, &before)?;
 
     let decision = if exec.backup_killed {
-        kill_recorded_group(ctx, task_id, worktree);
         summary.detail = Some("review supervisor did not return; backup deadline fired".into());
         ReviewDecision::Failed("review failed: supervisor wedged".into())
     } else if SHUTDOWN.load(Ordering::SeqCst) {

@@ -12,8 +12,9 @@ lifecycle for delegated work, so prefer it over hand-driving
    (`grove plan --topology` prints them, with the claim scope owning each);
    keep scopes tight and give every order explicit acceptance criteria and a
    verify profile. Then `summoner plan orders/` refutes the batch before any
-   worktree is spent: claim conflicts, package couplings, suggested waves,
-   and missing `after` edges. Revise until `clean`.
+   worktree is spent: unresolved claim conflicts block, while package
+   couplings and suggested waves are advisory. File-disjoint orders may run in
+   parallel; serialize overlapping scopes with `after`. Revise until `clean`.
 2. Preflight with `summoner doctor`: it checks each configured executor binary
    and its required environment, and the grove version.
 3. `summoner run orders/` executes the fleet. Each order gets an isolated

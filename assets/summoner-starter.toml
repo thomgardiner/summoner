@@ -44,6 +44,21 @@
 #                    needs it writable to commit from a linked worktree
 #   {order_file}     absolute path of the original order file
 #
+# Orchestrator profiles: which harness invokes summoner picks the executor
+# and reviewer defaults, so no vendor judges its own work. Profiles in the
+# global config apply machine-wide; this repo file adds or overrides them.
+# Selected by --profile <name> > SUMMONER_PROFILE > a `profile = "<name>"`
+# pin (global = whole machine, repo pin overrides) > harness auto-detection
+# (CLAUDECODE -> "claude", CODEX_SANDBOX -> "codex"; applies only when the
+# named profile exists; both markers at once is ambiguous and selects
+# nothing — pin or pass a flag in nested setups).
+#
+# [profiles.claude]              # Claude Code orchestrates
+# default_reviewer = "mytool"    # ...so another vendor reviews
+# [profiles.codex]               # codex orchestrates
+# default_executor = "other"
+# default_reviewer = "other-review"
+#
 # N-version dispatch: a work order may set `variants = ["mytool", "other"]`
 # instead of `executor` to race several executors over the same order. Each
 # gets its own worktree and branch; review the attempts and land one winner.

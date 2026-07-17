@@ -1,0 +1,8 @@
+[verification]
+# Verified = the full suite passed against the task's exact checkout.
+# Fleet tests need a grove >= 0.3.2 on PATH; they runtime-skip without one.
+required = ["fast"]
+
+[verification.profiles.fast]
+continue_on_failure = false
+commands = [{ argv = ["cargo", "nextest", "run"], allow_zero_tests = false }]

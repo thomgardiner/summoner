@@ -171,14 +171,31 @@ impl Fixture {
     }
 
     fn summoner(&self, args: &[&str]) -> Output {
-        Command::new(SUMMONER)
+        self.summoner_with_env(args, &[])
+    }
+
+    fn summoner_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        let mut command = Command::new(SUMMONER);
+        command
             .args(args)
             .current_dir(&self.repo)
             .env("SUMMONER_GROVE_BIN", grove_bin())
             .env("GROVE_CACHE_ROOT", self.base.path().join("cache"))
-            .env("XDG_CACHE_HOME", self.base.path().join("xdg"))
-            .output()
-            .expect("run summoner")
+            .env("XDG_CACHE_HOME", self.base.path().join("xdg"));
+        // Hermetic against the harness running THIS test suite: profile
+        // auto-detection must see only what each test opts into.
+        for marker in [
+            "CLAUDECODE",
+            "CODEX_SANDBOX",
+            "CODEX_HOME",
+            "SUMMONER_PROFILE",
+        ] {
+            command.env_remove(marker);
+        }
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command.output().expect("run summoner")
     }
 
     fn grove(&self, args: &[&str]) -> Output {
@@ -300,9 +317,75 @@ fn approving_reviewer_upgrades_verified_to_approved_and_exit_zero() {
         !prompt.contains("# Worker charter"),
         "implementer charter must not leak into the review"
     );
+    // The gate is observable live: review_started names the logs to tail
+    // before any verdict exists, and the verdict event follows it.
+    let events_path = fixture
+        .base
+        .path()
+        .join("xdg/summoner/runs")
+        .join(report["run_id"].as_str().unwrap())
+        .join("events.jsonl");
+    let events = std::fs::read_to_string(&events_path).unwrap();
+    let started_at = events.find("\"review_started\"").expect("review_started");
+    let verdict_at = events.find("\"order_review\"").expect("order_review");
+    assert!(started_at < verdict_at, "{events}");
+    assert!(events.contains("review-stdout.log"), "{events}");
     assert_eq!(
         fixture.task_states(),
         [("smn-wave".into(), "finished".into())]
+    );
+}
+
+#[test]
+fn orchestrator_profile_switches_the_reviewer_on_by_harness_marker() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    // The judge exists but is wired only through the claude profile: which
+    // orchestrator invokes summoner decides whether the gate is on.
+    let script = fixture.base.path().join("judge-executor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho '{\"verdict\":\"approve\",\"findings\":[]}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let existing = std::fs::read_to_string(fixture.repo.join(".summoner.toml")).unwrap();
+    std::fs::write(
+        fixture.repo.join(".summoner.toml"),
+        format!(
+            "{existing}\n[executors.judge]\nargv = [\"{}\"]\nprompt = \"stdin\"\n\
+             timeout_secs = 60\n\n[profiles.claude]\ndefault_reviewer = \"judge\"\n",
+            script.display()
+        ),
+    )
+    .unwrap();
+    fixture.commit_all("profile fixture");
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    // Bare invocation: no marker, no profile, no gate.
+    let output = fixture.summoner(&["run", order.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["orders"][0]["outcome"], "verified", "{report}");
+
+    // The same command from a Claude Code shell auto-selects [profiles.claude].
+    let output =
+        fixture.summoner_with_env(&["run", order.to_str().unwrap()], &[("CLAUDECODE", "1")]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["orders"][0]["outcome"], "approved", "{report}");
+    assert_eq!(
+        report["orders"][0]["review"]["reviewer"], "judge",
+        "{report}"
     );
 }
 
@@ -345,7 +428,13 @@ fn a_reviewer_that_writes_voids_its_verdict_and_the_writes_are_undone() {
         "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'executor work'",
         60,
     );
-    fixture.reviewer("echo sneaky > planted.txt\necho '{\"verdict\":\"approve\",\"findings\":[]}'");
+    // The worst reviewer: plants an untracked file AND stages a malicious
+    // edit to an in-scope file before approving its own tampering.
+    fixture.reviewer(
+        "echo sneaky > planted.txt\n\
+         echo 'pub fn sneak() {}' >> src/lib.rs\ngit add src/lib.rs\n\
+         echo '{\"verdict\":\"approve\",\"findings\":[]}'",
+    );
     let order = fixture.order("wave.toml", ORDER_TOML);
 
     let report = fixture.run_report(&[&order], 1);
@@ -358,7 +447,7 @@ fn a_reviewer_that_writes_voids_its_verdict_and_the_writes_are_undone() {
             .contains("modified the worktree"),
         "{report}"
     );
-    // The planted file never reaches the branch; the executor's work does.
+    // Neither write reaches the branch; the executor's work does.
     let show = Command::new("git")
         .args(["show", "grove/smn-wave:planted.txt"])
         .current_dir(&fixture.repo)
@@ -370,7 +459,9 @@ fn a_reviewer_that_writes_voids_its_verdict_and_the_writes_are_undone() {
         .current_dir(&fixture.repo)
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&show.stdout).contains("pub fn wave()"));
+    let lib = String::from_utf8_lossy(&show.stdout).into_owned();
+    assert!(lib.contains("pub fn wave()"), "{lib}");
+    assert!(!lib.contains("sneak"), "staged edit must be undone: {lib}");
 }
 
 #[test]
@@ -624,7 +715,9 @@ fn plan_refutes_a_batch_then_passes_it_once_revised() {
     .unwrap();
     std::fs::write(
         repo.join(".summoner.toml"),
-        "default_executor = \"fake\"\n[executors.fake]\nargv = [\"true\"]\nprompt = \"stdin\"\ntimeout_secs = 60\n",
+        "default_executor = \"fake\"\n\
+         [executors.fake]\nargv = [\"true\"]\nprompt = \"stdin\"\ntimeout_secs = 60\n\
+         [executors.fake2]\nargv = [\"true\"]\nprompt = \"stdin\"\ntimeout_secs = 60\n",
     )
     .unwrap();
     let git = |args: &[&str]| {
@@ -675,11 +768,11 @@ fn plan_refutes_a_batch_then_passes_it_once_revised() {
         serde_json::from_slice(&output.stdout).unwrap()
     };
 
-    // As written: app-work couples to core-work but declares nothing.
-    let report = plan(1);
-    assert_eq!(report["verdict"], "revise", "{report}");
-    assert_eq!(report["missing_after"][0]["id"], "app-work");
-    assert_eq!(report["missing_after"][0]["missing"][0], "core-work");
+    // Package topology is useful context, but disjoint work orders may run in
+    // parallel even when one package depends on the other.
+    let report = plan(0);
+    assert_eq!(report["verdict"], "clean", "{report}");
+    assert!(report["missing_after"].is_null(), "{report}");
     assert_eq!(
         report["partition"]["couplings"][0]["kind"], "dependency",
         "{report}"
@@ -698,7 +791,7 @@ fn plan_refutes_a_batch_then_passes_it_once_revised() {
         serde_json::json!([["core-work"], ["app-work"]])
     );
 
-    // A genuine claim conflict is a refusal however the edges look.
+    // A genuine claim conflict needs ordering.
     std::fs::write(
         orders.join("clash.toml"),
         "id = \"clash\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"crates/core/src\"]\n",
@@ -712,6 +805,39 @@ fn plan_refutes_a_batch_then_passes_it_once_revised() {
             .is_some_and(|c| !c.is_empty()),
         "{report}"
     );
+
+    // Once explicitly serialized, the overlap is dispatchable.
+    std::fs::write(
+        orders.join("clash.toml"),
+        "id = \"clash\"\ntitle = \"t\"\nbrief = \"b\"\n\
+         scope = [\"crates/core/src\"]\nafter = [\"core-work\"]\n",
+    )
+    .unwrap();
+    let report = plan(0);
+    assert_eq!(report["verdict"], "clean", "{report}");
+
+    // Variant siblings deliberately share scope; their claim group flows
+    // through the partition, so an N-version race plans clean.
+    std::fs::write(
+        orders.join("race.toml"),
+        "id = \"race\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"README.md\"]\n\
+         variants = [\"fake\", \"fake2\"]\n",
+    )
+    .unwrap();
+    let report = plan(0);
+    assert_eq!(report["verdict"], "clean", "{report}");
+    // The ordered clash conflict remains listed; the point is the siblings'
+    // deliberate overlap never registers as one.
+    for conflict in report["partition"]["conflicts"].as_array().unwrap() {
+        for side in ["a", "b"] {
+            assert!(
+                !conflict[side]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("race-")),
+                "{report}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -834,6 +960,62 @@ fn usage_marker_records_tokens_per_order_and_per_run() {
     let report = fixture.run_report(&[&order], 0);
     assert_eq!(report["orders"][0]["usage_tokens"], 1234, "{report}");
     assert_eq!(report["usage_tokens"], 1234, "{report}");
+}
+
+#[test]
+fn resume_deduplicates_variant_siblings_sharing_one_order_file() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn f() {}' >> src/lib.rs\ngit add -A\ngit commit -qm w",
+        60,
+    );
+    let script = fixture.base.path().join("fake2-executor.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho 'pub fn g() {}' >> src/lib.rs\ngit add -A\ngit commit -qm w2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fixture.append_config(&format!(
+        "\n[executors.fake2]\nargv = [\"{}\"]\nprompt = \"stdin\"\ntimeout_secs = 60",
+        script.display()
+    ));
+    let order = fixture.order(
+        "race.toml",
+        r#"
+id = "race"
+title = "t"
+brief = "b"
+scope = ["src"]
+verify_profile = "fast"
+variants = ["fake", "fake2"]
+"#,
+    );
+
+    let report = fixture.run_report(&[&order], 0);
+    let run_id = report["run_id"].as_str().unwrap();
+
+    // Both siblings report the same order file; resume must not load it
+    // twice (duplicate expanded ids would abort validation).
+    let output = fixture.summoner(&["resume", run_id]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let resumed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(resumed["summary"]["verified"], 2, "{resumed}");
+    for entry in resumed["orders"].as_array().unwrap() {
+        assert!(
+            entry["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("carried")),
+            "{resumed}"
+        );
+    }
 }
 
 #[test]
