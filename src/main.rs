@@ -49,6 +49,11 @@ enum Cmd {
         /// where personal executor definitions belong.
         #[arg(long)]
         global: bool,
+        /// Update summoner-managed contract content in place: the AGENTS.md
+        /// section (marker to marker) and the Claude skill. Never touches
+        /// .summoner.toml — repo policy is yours once written.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Print the resolved configuration and where it came from.
     Config,
@@ -121,11 +126,11 @@ fn dispatch() -> Result<i32> {
         Ok(resolved)
     };
     match cli.cmd {
-        Cmd::Init { global } => {
+        Cmd::Init { global, refresh } => {
             let report = if global {
                 init::init_global()?
             } else {
-                init::init(&std::env::current_dir()?)?
+                init::init(&std::env::current_dir()?, refresh)?
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)

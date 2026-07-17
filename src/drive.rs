@@ -197,6 +197,19 @@ impl<'a> OrderRun<'a> {
             report.outcome = outcome;
             return self.done(report, Some(reason));
         }
+        if !self.order.acceptance.is_empty() {
+            let result = self.worker_result(&prefix);
+            if let Err(detail) = result.unwrap_or_else(|| {
+                Err("executor omitted the required summoner completion result".into())
+            }) {
+                report.outcome = Outcome::Unverified;
+                report.detail = Some(detail);
+                if self.try_revise(report)? {
+                    return Ok(Flow::Retry);
+                }
+                return self.done(report, Some("summoner: executor reported incomplete work"));
+            }
+        }
         if self.protected_tripwire(report)? {
             return self.done(
                 report,
@@ -406,6 +419,16 @@ impl<'a> OrderRun<'a> {
         }
     }
 
+    fn worker_result(&self, prefix: &str) -> Option<Result<(), String>> {
+        [format!("{prefix}stdout.log"), format!("{prefix}stderr.log")]
+            .iter()
+            .find_map(|name| {
+                head_and_tail(&self.order_dir.join(name))
+                    .as_deref()
+                    .and_then(parse_worker_result)
+            })
+    }
+
     /// Deterministic anti-hacking scan before any evidence is trusted. A
     /// modified verification config invalidates the receipts it would
     /// produce, so that is a hard stop and never revised; soft flags ride
@@ -607,4 +630,100 @@ fn revise(ctx: &Ctx, order: &Order, order_dir: &Path, report: &mut OrderReport, 
             "stderr_log": order_dir.join(format!("{prefix}stderr.log")).display().to_string(),
         }),
     );
+}
+
+const WORKER_RESULT_WINDOW: usize = 10;
+
+fn parse_worker_result(output: &str) -> Option<Result<(), String>> {
+    for line in output
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(WORKER_RESULT_WINDOW)
+    {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(status) = value.get("summoner_status") else {
+            continue;
+        };
+        let Some(status) = status.as_str() else {
+            return Some(Err(
+                "executor emitted a malformed summoner completion result".into(),
+            ));
+        };
+        let Some(unmet) = value.get("unmet").and_then(serde_json::Value::as_array) else {
+            return Some(Err(
+                "executor completion result is missing an unmet list".into()
+            ));
+        };
+        let Some(unmet) = unmet
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Some(Err(
+                "executor completion result has a malformed unmet list".into()
+            ));
+        };
+        return Some(match (status, unmet.is_empty()) {
+            ("complete", true) => Ok(()),
+            ("complete", false) | ("incomplete", false) => Err(format!(
+                "executor reported unmet acceptance: {}",
+                unmet.join("; ")
+            )),
+            ("incomplete", true) => Err("executor reported incomplete work".into()),
+            _ => Err(format!(
+                "executor reported unknown summoner status {status:?}"
+            )),
+        });
+    }
+    None
+}
+
+#[cfg(test)]
+mod worker_result_tests {
+    use super::parse_worker_result;
+
+    #[test]
+    fn complete_requires_an_empty_unmet_list() {
+        assert!(matches!(
+            parse_worker_result(r#"{"summoner_status":"complete","unmet":[]}"#),
+            Some(Ok(()))
+        ));
+        assert!(matches!(
+            parse_worker_result(
+                r#"{"summoner_status":"complete","unmet":["wire test"]}"#
+            ),
+            Some(Err(reason)) if reason.contains("wire test")
+        ));
+    }
+
+    #[test]
+    fn incomplete_and_malformed_results_fail_closed() {
+        assert!(matches!(
+            parse_worker_result(
+                r#"{"summoner_status":"incomplete","unmet":["Windows artifact"]}"#
+            ),
+            Some(Err(reason)) if reason.contains("Windows artifact")
+        ));
+        assert!(matches!(
+            parse_worker_result(r#"{"summoner_status":"complete"}"#),
+            Some(Err(_))
+        ));
+    }
+
+    #[test]
+    fn only_the_trailing_window_is_trusted() {
+        let buried = format!(
+            "{}\n{}",
+            r#"{"summoner_status":"complete","unmet":[]}"#,
+            (0..11).map(|_| "footer").collect::<Vec<_>>().join("\n")
+        );
+        assert!(parse_worker_result(&buried).is_none());
+    }
 }

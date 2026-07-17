@@ -106,6 +106,13 @@ impl Fixture {
     /// One fake executor; the config routes the prompt on stdin, which the
     /// scripts deliberately ignore (prompt composition is unit-tested).
     fn executor(&self, body: &str, timeout_secs: u64) {
+        self.executor_raw(
+            &format!("{body}\necho '{{\"summoner_status\":\"complete\",\"unmet\":[]}}'"),
+            timeout_secs,
+        );
+    }
+
+    fn executor_raw(&self, body: &str, timeout_secs: u64) {
         let script = self.base.path().join("fake-executor.sh");
         std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -317,6 +324,30 @@ fn clean_executor_exit_without_changes_is_not_verified() {
         entry["detail"]
             .as_str()
             .is_some_and(|detail| detail.contains("no changes")),
+        "{report}"
+    );
+    assert!(entry.get("verify").is_none(), "{report}");
+}
+
+#[test]
+fn executor_declaring_unmet_acceptance_is_not_verified() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor_raw(
+        "echo 'pub fn wave() {}' >> src/lib.rs\n\
+         git add -A\ngit commit -qm 'partial executor work'\n\
+         echo '{\"summoner_status\":\"incomplete\",\"unmet\":[\"wire regression missing\"]}'",
+        60,
+    );
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let report = fixture.run_report(&[&order], 1);
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "unverified", "{report}");
+    assert!(
+        entry["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("wire regression missing")),
         "{report}"
     );
     assert!(entry.get("verify").is_none(), "{report}");
@@ -536,7 +567,8 @@ fn rejected_work_is_revised_with_findings_in_a_resumed_session() {
         &resume,
         format!(
             "#!/bin/sh\necho \"$1\" > {}\ncat > {}\n\
-             echo 'pub fn fixed() {{}}' >> src/lib.rs\ngit add -A\ngit commit -qm fix\n",
+             echo 'pub fn fixed() {{}}' >> src/lib.rs\ngit add -A\ngit commit -qm fix\n\
+             echo '{{\"summoner_status\":\"complete\",\"unmet\":[]}}'\n",
             fixture.base.path().join("resumed-with.txt").display(),
             fixture.base.path().join("revision-prompt.txt").display(),
         ),

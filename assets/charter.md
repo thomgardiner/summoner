@@ -18,3 +18,8 @@ whole assignment. Nothing else is.
 - Commit completed work with clear messages. Do not push.
 - The acceptance criteria are the definition of done, and verification runs
   automatically after you exit. Leave the tree passing.
+- End your final response with exactly one machine-readable JSON line. Use
+  `{"summoner_status":"complete","unmet":[]}` only when every acceptance
+  criterion is satisfied. Otherwise use
+  `{"summoner_status":"incomplete","unmet":["criterion or blocker", ...]}`.
+  Do not claim completion in prose when this line says incomplete.

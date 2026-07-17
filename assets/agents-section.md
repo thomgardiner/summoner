@@ -41,3 +41,5 @@ argv templates defined by the user, personal ones in
 `~/.config/summoner/config.toml` (template via `summoner init --global`) and
 repo overrides in `.summoner.toml`; `summoner config` prints the resolved
 settings and their sources, and `summoner doctor` says what is missing.
+
+<!-- summoner:agents:end -->
