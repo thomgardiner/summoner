@@ -1,0 +1,28 @@
+# A dependent order. Two separate fields make it build on add-endpoint's
+# work: `after` controls *when* it runs, `base` controls *what code it sees*.
+
+id = "document-endpoint"
+
+title = "Document the /health endpoint"
+
+brief = """
+Document the GET /health endpoint in README.md: the URL, the JSON body it
+returns, and when to use it. The endpoint code is already on this branch.
+"""
+
+scope = ["README.md"]
+
+acceptance = ["README.md documents GET /health and its response body"]
+
+# Ordering and failure propagation only: this order waits until add-endpoint
+# reaches verified or completed, and is skipped if add-endpoint fails. It
+# does NOT bring in add-endpoint's changes — a dependent still builds from
+# its own base.
+after = ["add-endpoint"]
+
+# Branch chaining is what makes the dependency's work visible. Each order's
+# branch name is deterministic (grove/smn-<id>), so basing this worktree on
+# grove/smn-add-endpoint starts it from the finished endpoint code. Without
+# this line the order would still run after add-endpoint, but from the
+# default base — never seeing the endpoint it is meant to document.
+base = "grove/smn-add-endpoint"

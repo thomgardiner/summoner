@@ -1,0 +1,39 @@
+# A standalone work order: one independent task per file, TOML or JSON.
+# The orchestrator writes these; summoner validates, dispatches, and reports.
+
+# Required. Unique identifier matching [a-z0-9_-]+. It also fixes the grove
+# agent name (smn-add-endpoint) and the deterministic branch the work lands
+# on (grove/smn-add-endpoint), which is how later orders chain onto this one.
+id = "add-endpoint"
+
+# Required. Short task title, shown in the ranked report.
+title = "Add a GET /health endpoint"
+
+# Required. The instructions the executor receives verbatim, composed with
+# the worker charter. Say what to build, what to read first, and what done
+# looks like — the executor sees nothing else about your plan.
+brief = """
+Add a GET /health endpoint returning {"status":"ok"} as JSON.
+Read src/routes/mod.rs first and register the route the same way the
+existing routes do. Add one integration test asserting the 200 response.
+"""
+
+# Required. The only paths (or crate:<name> claims) the executor may change.
+# Passed verbatim to grove, which enforces the claim and blocks any other
+# order that tries to claim the same scope while this one holds it.
+scope = ["src/routes", "tests/health.rs"]
+
+# Optional. Definition of done, included in the executor prompt and echoed
+# in the report so the reviewer can check each point.
+acceptance = [
+  "GET /health returns 200 with a JSON body",
+  "an integration test covers the endpoint",
+]
+
+# Optional. Grove verification profile to run after the executor exits; the
+# order only ranks as verified when this passes.
+verify_profile = "fast"
+
+# Optional. Per-order execution timeout in seconds (1..=604800). Overrides
+# the executor's own timeout_secs; the configured default applies when unset.
+timeout_secs = 900

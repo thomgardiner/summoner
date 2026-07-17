@@ -20,6 +20,26 @@ pub struct Report {
     pub skipped: Vec<String>,
 }
 
+/// Drop the executor template at the user-global config path, where personal
+/// executor definitions belong. Never clobbers an existing file.
+pub fn init_global() -> Result<Report> {
+    let path = crate::config::global_path().context("no home directory for the global config")?;
+    if path.exists() {
+        return Ok(Report {
+            written: Vec::new(),
+            skipped: vec![path.display().to_string()],
+        });
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("creating the global config directory")?;
+    }
+    std::fs::write(&path, STARTER_TOML).context("writing the global config template")?;
+    Ok(Report {
+        written: vec![path.display().to_string()],
+        skipped: Vec::new(),
+    })
+}
+
 pub fn init(workspace: &Path) -> Result<Report> {
     let mut written = Vec::new();
     let mut skipped = Vec::new();
@@ -106,11 +126,24 @@ mod tests {
     fn shipped_assets_are_internally_consistent() {
         // The marker gates idempotency, so the section must actually carry it.
         assert!(AGENTS_SECTION.contains(MARKER));
-        // The starter file must parse as our own config and name real backends.
+        // The starter is a TEMPLATE: it parses as our own config, ships zero
+        // executors (which CLIs run under which accounts is personal, never
+        // product), and documents every placeholder and routing mode.
         let config: crate::config::Config = toml::from_str(STARTER_TOML).unwrap();
-        assert_eq!(config.default_executor.as_deref(), Some("codex"));
-        for name in ["codex", "glm", "claude"] {
-            assert!(config.executors.contains_key(name), "missing preset {name}");
+        assert!(config.executors.is_empty(), "presets must not ship");
+        assert!(config.default_executor.is_none());
+        for token in [
+            "{prompt}",
+            "{prompt_file}",
+            "{worktree}",
+            "{git_common_dir}",
+            "{order_file}",
+            "\"stdin\"",
+            "usage_marker",
+            "env_required",
+            "init --global",
+        ] {
+            assert!(STARTER_TOML.contains(token), "template lost {token}");
         }
         assert!(!CHARTER.trim().is_empty());
     }

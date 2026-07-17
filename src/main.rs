@@ -30,7 +30,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Drop the orchestration contract: starter config, AGENTS.md section, Claude skill.
-    Init,
+    Init {
+        /// Instead write the executor template to ~/.config/summoner/config.toml,
+        /// where personal executor definitions belong.
+        #[arg(long)]
+        global: bool,
+    },
     /// Print the resolved configuration and where it came from.
     Config,
     /// Validate order files without dispatching anything.
@@ -76,8 +81,12 @@ fn main() {
 
 fn dispatch() -> Result<i32> {
     match Cli::parse().cmd {
-        Cmd::Init => {
-            let report = init::init(&std::env::current_dir()?)?;
+        Cmd::Init { global } => {
+            let report = if global {
+                init::init_global()?
+            } else {
+                init::init(&std::env::current_dir()?)?
+            };
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }
@@ -129,6 +138,8 @@ struct DoctorReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     default_executor: Option<String>,
     executors: Vec<DoctorExecutor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<String>,
     ok: bool,
 }
 
@@ -183,8 +194,9 @@ fn doctor(config: &config::Config) -> Result<i32> {
     };
 
     let git_repo = git_ok(&["rev-parse", "--git-dir"]);
-    let git_identity =
-        git_ok(&["config", "--get", "user.name"]) && git_ok(&["config", "--get", "user.email"]);
+    // `git var` answers the question commit itself asks, including fallbacks
+    // (macOS account name); probing config alone rejects working setups.
+    let git_identity = git_ok(&["var", "GIT_AUTHOR_IDENT"]);
     let repo = DoctorRepo {
         git_repo,
         git_identity,
@@ -219,13 +231,24 @@ fn doctor(config: &config::Config) -> Result<i32> {
         Some(name) => config.executors.contains_key(name),
         None => true,
     };
-    let ok =
-        grove_report.ok && repo.ok && default_ok && executors.iter().all(|executor| executor.ok);
+    // Zero executors means nothing can dispatch; say where they belong
+    // instead of reporting a hollow success.
+    let hint = config.executors.is_empty().then(|| {
+        "no executors configured; run `summoner init --global` and define yours in \
+         ~/.config/summoner/config.toml (personal) or .summoner.toml (repo override)"
+            .to_string()
+    });
+    let ok = grove_report.ok
+        && repo.ok
+        && default_ok
+        && hint.is_none()
+        && executors.iter().all(|executor| executor.ok);
     let report = DoctorReport {
         grove: grove_report,
         repo,
         default_executor,
         executors,
+        hint,
         ok,
     };
     println!("{}", serde_json::to_string_pretty(&report)?);

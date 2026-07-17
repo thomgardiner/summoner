@@ -33,5 +33,7 @@ Chain dependent work with `after = ["<id>"]`: one run executes the whole DAG,
 and dependents of failed orders come back `skipped`. The chain is ordering
 only, so an order that builds on a dependency's changes must also set
 `base = "grove/smn-<dep-id>"` (branch names are deterministic). Executors are
-argv templates in `.summoner.toml`; `summoner config` prints the resolved
-settings and their sources.
+argv templates defined by the user, personal ones in
+`~/.config/summoner/config.toml` (template via `summoner init --global`) and
+repo overrides in `.summoner.toml`; `summoner config` prints the resolved
+settings and their sources, and `summoner doctor` says what is missing.

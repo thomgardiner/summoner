@@ -89,7 +89,7 @@ Fleet control: `fail_fast = N` in `.summoner.toml` skips the remaining queue aft
 
 ## Executor configuration
 
-Executors are argv templates in `.summoner.toml`; Summoner contains no vendor-specific dispatch logic. One shipped preset is:
+Executors are argv templates; Summoner contains no vendor-specific dispatch logic and ships no presets — which agent CLIs you run, under which flags and accounts, is personal configuration. Define executors once in `~/.config/summoner/config.toml` (`summoner init --global` drops an annotated template there); a repo's `.summoner.toml` overrides same-named executors. An example:
 
 ```toml
 default_executor = "codex"
@@ -103,6 +103,8 @@ argv = [
 prompt = "arg"
 timeout_secs = 900
 ```
+
+Never disable an executor CLI's own permission or sandbox system to make a configuration work; prefer explicit allowlists scoped to the worktree plus `{git_common_dir}`.
 
 An executor supports the fields `argv`, `prompt`, `timeout_secs`, and `env_required`. Prompt routing is `arg`, `stdin`, or `file`. Templates may use:
 
