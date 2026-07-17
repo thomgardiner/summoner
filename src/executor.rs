@@ -31,11 +31,18 @@ pub struct ExecRequest<'a> {
     pub run_dir: &'a Path,
     pub timeout_secs: u64,
     pub shutdown: &'a AtomicBool,
+    /// The argv template for this spawn. The caller picks the backend's
+    /// `argv`, or its `resume_argv` when a revision continues a session.
+    pub argv: &'a [String],
+    /// Captured session identifier substituted into `{session_id}`; empty
+    /// when no session is being resumed.
+    pub session_id: &'a str,
     /// The composed prompt. The caller chooses the charter: worker charter
     /// for implementation, review charter for the quality gate.
     pub prompt: &'a str,
     /// Prefix for this spawn's files in the run dir ("" for the executor,
-    /// "review-" for the reviewer), so one order's runs never collide.
+    /// "review-" for the reviewer, "r2-" for a second attempt), so one
+    /// order's runs never collide.
     pub file_prefix: &'a str,
 }
 
@@ -71,6 +78,7 @@ pub fn compose_prompt(order: &Order) -> String {
 
 /// Literal per-element substitution: argv stays an array end to end, so
 /// vendor greedy-flag orderings and spacing survive exactly as configured.
+#[allow(clippy::too_many_arguments)]
 pub fn expand(
     template: &[String],
     prompt: &str,
@@ -78,6 +86,7 @@ pub fn expand(
     git_common_dir: &Path,
     order_file: &Path,
     prompt_file: &Path,
+    session_id: &str,
 ) -> Vec<String> {
     template
         .iter()
@@ -86,11 +95,43 @@ pub fn expand(
                 .replace("{git_common_dir}", &git_common_dir.display().to_string())
                 .replace("{order_file}", &order_file.display().to_string())
                 .replace("{prompt_file}", &prompt_file.display().to_string())
+                .replace("{session_id}", session_id)
                 // Last, so placeholder tokens inside the prompt text are never
                 // re-scanned: the orchestrator's brief must arrive verbatim.
                 .replace("{prompt}", prompt)
         })
         .collect()
+}
+
+/// The follow-up prompt for a revision attempt. When the executor's session
+/// is resumed, the charter and order are already in its context; a fresh
+/// context gets the full assignment again before the evidence.
+pub fn compose_revision_prompt(
+    order: &Order,
+    attempt: u64,
+    resumed: bool,
+    feedback: &str,
+) -> String {
+    let mut prompt = if resumed {
+        String::new()
+    } else {
+        compose_prompt(order)
+    };
+    prompt.push_str(&format!(
+        "\n# Revision attempt {attempt} for order {}\n\n",
+        order.id
+    ));
+    prompt.push_str(
+        "Your previous attempt is committed on this branch in this worktree, \
+         and it was NOT accepted. The evidence:\n\n",
+    );
+    prompt.push_str(feedback);
+    prompt.push_str(
+        "\n\nAddress every point, amend the work on this branch, and commit. \
+         The same scope and acceptance criteria apply; verification and \
+         review run again.\n",
+    );
+    prompt
 }
 
 pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
@@ -103,12 +144,13 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
     std::fs::write(&prompt_path, &prompt).context("writing prompt.md")?;
 
     let executor_argv = expand(
-        &req.backend.argv,
+        req.argv,
         &prompt,
         req.worktree,
         req.git_common_dir,
         &req.order.source,
         &prompt_path,
+        req.session_id,
     );
     let argv = req
         .grove
@@ -124,7 +166,7 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
         .current_dir(req.worktree)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    command.stdin(match req.backend.prompt {
+    command.stdin(match req.backend.routing() {
         // grove task exec passes stdin through untouched to the executor.
         PromptRouting::Stdin => Stdio::piped(),
         // Closed stdin so headless CLIs cannot hang waiting for input.
@@ -217,6 +259,7 @@ mod tests {
             executor: None,
             reviewer: None,
             timeout_secs: None,
+            max_tokens: None,
             base: None,
             branch: None,
             variants: Vec::new(),
@@ -252,6 +295,7 @@ mod tests {
             Path::new("/repo/.git"),
             Path::new("/orders/a.toml"),
             Path::new("/runs/a/prompt.md"),
+            "",
         );
         assert_eq!(argv, ["run", "--pure", "PROMPT TEXT", "--dir", "/wt"]);
 
@@ -270,6 +314,7 @@ mod tests {
             Path::new("/repo/.git"),
             Path::new("/orders/a.toml"),
             Path::new("/runs/a/prompt.md"),
+            "",
         );
         assert_eq!(
             argv,
@@ -290,6 +335,7 @@ mod tests {
             Path::new("/repo/.git"),
             Path::new("/orders/a.toml"),
             Path::new("/runs/a/prompt.md"),
+            "",
         );
         assert_eq!(argv, ["keep {worktree} and {git_common_dir} literal"]);
     }

@@ -24,6 +24,10 @@ pub struct Order {
     /// verifies; overrides `default_reviewer`. `"none"` opts this order out.
     pub reviewer: Option<String>,
     pub timeout_secs: Option<u64>,
+    /// Token ceiling for this order. Usage is scraped after each executor
+    /// exit, so this cannot stop a live overrun — but an over-budget attempt
+    /// is never revised, and the overage is called out in the report.
+    pub max_tokens: Option<u64>,
     pub base: Option<String>,
     pub branch: Option<String>,
     /// Order ids that must reach `verified` or `completed` first. Ordering and
@@ -334,7 +338,7 @@ fn backend_problems(name: &str, backend: &ExecutorBackend) -> Vec<String> {
         problems.push(format!("executor {name:?}: argv is empty"));
         return problems;
     }
-    match backend.prompt {
+    match backend.routing() {
         PromptRouting::Arg if !has("{prompt}") => problems.push(format!(
             "executor {name:?}: prompt routing \"arg\" needs a {{prompt}} placeholder in argv"
         )),
@@ -343,12 +347,12 @@ fn backend_problems(name: &str, backend: &ExecutorBackend) -> Vec<String> {
         )),
         _ => {}
     }
-    if backend.prompt != PromptRouting::Arg && has("{prompt}") {
+    if backend.routing() != PromptRouting::Arg && has("{prompt}") {
         problems.push(format!(
             "executor {name:?}: argv references {{prompt}} but routing is not \"arg\""
         ));
     }
-    if backend.prompt != PromptRouting::File && has("{prompt_file}") {
+    if backend.routing() != PromptRouting::File && has("{prompt_file}") {
         problems.push(format!(
             "executor {name:?}: argv references {{prompt_file}} but routing is not \"file\""
         ));
@@ -426,10 +430,12 @@ mod tests {
                 name.to_string(),
                 ExecutorBackend {
                     argv: argv.iter().map(|s| s.to_string()).collect(),
-                    prompt: *routing,
+                    prompt: Some(*routing),
                     timeout_secs: None,
                     env_required: Vec::new(),
                     usage_marker: None,
+                    session_marker: None,
+                    resume_argv: Vec::new(),
                 },
             );
         }

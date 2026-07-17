@@ -262,6 +262,7 @@ more narration
             executor: None,
             reviewer: None,
             timeout_secs: None,
+            max_tokens: None,
             base: None,
             branch: None,
             variants: Vec::new(),

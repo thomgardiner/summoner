@@ -16,6 +16,7 @@ mod report;
 mod review;
 mod run;
 mod tripwires;
+mod watch;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -77,6 +78,12 @@ enum Cmd {
         #[arg(long)]
         stream: bool,
     },
+    /// Live terminal board over a run's event stream (defaults to the
+    /// latest run); exits when the run finishes.
+    Watch {
+        /// A run id from a report or run directory name.
+        run_id: Option<String>,
+    },
     /// Summoner-owned grove tasks (owner prefix smn-), as JSON.
     Status,
     /// Check every configured executor and the grove binary; fail fast on setup problems.
@@ -137,6 +144,7 @@ fn dispatch() -> Result<i32> {
         Cmd::Plan { paths } => plan::plan(&resolved()?.config, &paths),
         Cmd::Run { paths, stream } => run::run(&resolved()?.config, &paths, stream),
         Cmd::Resume { run_id, stream } => run::resume(&resolved()?.config, &run_id, stream),
+        Cmd::Watch { run_id } => watch::watch(run_id),
         Cmd::Status => {
             let resolved = resolved()?;
             let grove = grove::GroveCli::new(resolved.config.grove_bin());

@@ -73,6 +73,13 @@ outcomes. Everything between is Summoner's job.
    criteria, and log tails. Review the diff on the order's branch against its
    acceptance criteria before landing anything. Re-dispatch failures with a
    revised order; do not hand-patch inside the executor's worktree.
+   With `revise = N` configured, rejected/unverified orders already
+   re-dispatched with their evidence (resuming the executor's session when
+   the backend defines `resume_argv`) before reaching the report — the
+   `attempts` field says how many tries an entry took, and `session_id`
+   lets you resume the executor's context manually. `run_token_budget`
+   and per-order `max_tokens` bound the spend; `summoner watch` shows the
+   fleet live.
 
 ## Rules
 

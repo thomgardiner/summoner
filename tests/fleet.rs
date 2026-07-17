@@ -284,6 +284,97 @@ fn happy_path_order_is_verified_released_and_salvaged_to_its_branch() {
 }
 
 #[test]
+fn verifier_created_ignored_artifacts_do_not_block_release() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    std::fs::write(fixture.repo.join(".gitignore"), "verify.out\n").unwrap();
+    std::fs::write(
+        fixture.repo.join(".grove.toml"),
+        GROVE_TOML.replace("[\"true\"]", "[\"sh\", \"-c\", \"touch verify.out\"]"),
+    )
+    .unwrap();
+    fixture.executor(
+        "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let report = fixture.run_report(&[&order], 0);
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "verified", "{report}");
+    assert!(!Path::new(entry["worktree"].as_str().unwrap()).exists());
+}
+
+#[test]
+fn executor_created_ignored_artifacts_remain_protected() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    std::fs::write(fixture.repo.join(".gitignore"), "executor.out\n").unwrap();
+    fixture.executor(
+        "echo private > executor.out\n\
+         echo 'pub fn wave() {}' >> src/lib.rs\n\
+         git add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let report = fixture.run_report(&[&order], 1);
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "error", "{report}");
+    assert!(
+        entry["release_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("ignored path")),
+        "{report}"
+    );
+    let worktree = Path::new(entry["worktree"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("executor.out")).unwrap(),
+        "private\n"
+    );
+}
+
+#[test]
+fn internal_error_after_commit_preserves_report_evidence() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    let wrapper = fixture.base.path().join("failing-grove.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = verify ]; then echo 'forced verify failure' >&2; exit 2; fi\n\
+             exec '{}' \"$@\"\n",
+            grove_bin().replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let output = fixture.summoner_with_env(
+        &["run", order.to_str().unwrap()],
+        &[("SUMMONER_GROVE_BIN", wrapper.to_str().unwrap())],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "error", "{report}");
+    assert_eq!(entry["commits"], 1, "{report}");
+    assert_eq!(entry["diff"]["files_changed"], 1, "{report}");
+    assert!(
+        entry["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("forced verify failure")),
+        "{report}"
+    );
+}
+
+#[test]
 fn approving_reviewer_upgrades_verified_to_approved_and_exit_zero() {
     require_grove!();
     let fixture = Fixture::new(true);
@@ -385,6 +476,126 @@ fn orchestrator_profile_switches_the_reviewer_on_by_harness_marker() {
     assert_eq!(report["orders"][0]["outcome"], "approved", "{report}");
     assert_eq!(
         report["orders"][0]["review"]["reviewer"], "judge",
+        "{report}"
+    );
+}
+
+#[test]
+fn rejected_work_is_revised_with_findings_in_a_resumed_session() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    // Attempt 1: prints a session banner, commits work the judge will reject.
+    fixture.executor(
+        "echo 'session id: sess-42'\n\
+         echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm w",
+        60,
+    );
+    // The revision resumes the session: a different script that receives
+    // {session_id}, records it, and fixes the work.
+    let resume = fixture.base.path().join("resume-executor.sh");
+    std::fs::write(
+        &resume,
+        format!(
+            "#!/bin/sh\necho \"$1\" > {}\ncat > {}\n\
+             echo 'pub fn fixed() {{}}' >> src/lib.rs\ngit add -A\ngit commit -qm fix\n",
+            fixture.base.path().join("resumed-with.txt").display(),
+            fixture.base.path().join("revision-prompt.txt").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&resume, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fixture.append_config(&format!(
+        "session_marker = \"session id:\"\nresume_argv = [\"{}\", \"{{session_id}}\"]",
+        resume.display()
+    ));
+    // The judge rejects the first attempt and approves the second.
+    let flag = fixture.base.path().join("judged-once");
+    fixture.reviewer(&format!(
+        "if [ -f {flag} ]; then echo '{{\"verdict\":\"approve\",\"findings\":[]}}'; \
+         else touch {flag}; \
+         echo '{{\"verdict\":\"reject\",\"findings\":[{{\"severity\":\"blocker\",\"file\":\"src/lib.rs\",\"line\":1,\"summary\":\"wave is wrong\"}}]}}'; fi",
+        flag = flag.display()
+    ));
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let output = fixture.summoner_with_env(
+        &["run", order.to_str().unwrap()],
+        &[("SUMMONER_REVISE", "1")],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "approved", "{report}");
+    assert_eq!(entry["attempts"], 2, "{report}");
+    assert_eq!(entry["session_id"], "sess-42", "{report}");
+    assert_eq!(entry["review"]["verdict"], "approve", "{report}");
+
+    // The resume template really received the captured session id...
+    let resumed = std::fs::read_to_string(fixture.base.path().join("resumed-with.txt")).unwrap();
+    assert_eq!(resumed.trim(), "sess-42");
+    // ...and the revision prompt carried the findings, not the full charter
+    // (the session already has it).
+    let prompt = std::fs::read_to_string(fixture.base.path().join("revision-prompt.txt")).unwrap();
+    assert!(prompt.contains("wave is wrong"), "{prompt}");
+    assert!(!prompt.contains("# Worker charter"), "{prompt}");
+
+    // Both attempts' work landed on the branch.
+    let show = Command::new("git")
+        .args(["show", "grove/smn-wave:src/lib.rs"])
+        .current_dir(&fixture.repo)
+        .output()
+        .unwrap();
+    let lib = String::from_utf8_lossy(&show.stdout).into_owned();
+    assert!(lib.contains("pub fn wave()"), "{lib}");
+    assert!(lib.contains("pub fn fixed()"), "{lib}");
+}
+
+#[test]
+fn run_token_budget_skips_the_rest_of_the_queue() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn f() {}' >> src/lib.rs\ngit add -A\ngit commit -qm w\necho 'tokens used'\necho 500",
+        60,
+    );
+    fixture.append_config("usage_marker = \"tokens used\"");
+    let a = fixture.order(
+        "a.toml",
+        "id = \"a\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\nverify_profile = \"fast\"\n",
+    );
+    let b = fixture.order(
+        "b.toml",
+        "id = \"b\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"docs\"]\nverify_profile = \"fast\"\n",
+    );
+
+    let output = fixture.summoner_with_env(
+        &["run", a.to_str().unwrap(), b.to_str().unwrap()],
+        &[
+            ("SUMMONER_MAX_PARALLEL", "1"),
+            ("SUMMONER_RUN_TOKEN_BUDGET", "100"),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["summary"]["verified"], 1, "{report}");
+    assert_eq!(report["summary"]["skipped"], 1, "{report}");
+    let skipped = report["orders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["outcome"] == "skipped")
+        .unwrap();
+    assert!(
+        skipped["detail"]
+            .as_str()
+            .unwrap()
+            .contains("budget exhausted"),
         "{report}"
     );
 }

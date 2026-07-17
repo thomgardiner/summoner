@@ -158,6 +158,12 @@ pub struct OrderReport {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+    /// How many executor attempts this order took (1 = no revisions).
+    pub attempts: u64,
+    /// The executor's own session identifier, when a `session_marker`
+    /// captured one — revisions resume it, and so can the orchestrator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub commits: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<DiffStats>,
@@ -211,6 +217,8 @@ impl OrderReport {
             worktree: None,
             branch: None,
             base_commit: None,
+            attempts: 1,
+            session_id: None,
             commits: 0,
             diff: None,
             saved_to: None,
@@ -285,6 +293,7 @@ mod tests {
             executor: None,
             reviewer: None,
             timeout_secs: None,
+            max_tokens: None,
             base: None,
             branch: None,
             variants: Vec::new(),

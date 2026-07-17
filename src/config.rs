@@ -27,6 +27,14 @@ pub struct Config {
     /// Stop dispatching after this many orders fail: remaining orders report
     /// `skipped` instead of spending executor budget on a doomed fleet.
     pub fail_fast: Option<usize>,
+    /// Re-dispatch a rejected or unverified order with its failure evidence
+    /// up to this many extra attempts before it lands in the report.
+    pub revise: Option<usize>,
+    /// Hard token ceiling for a whole run. Once recorded usage crosses it,
+    /// remaining orders are skipped. Enforcement is between dispatches:
+    /// usage is scraped from executor output after each exit, so one
+    /// in-flight order can overshoot before the breaker sees it.
+    pub run_token_budget: Option<u64>,
     pub executors: BTreeMap<String, ExecutorBackend>,
     /// Pin a profile by name: "always use this matrix here". Global config
     /// pins the whole machine; a repo file overrides the pin. The `--profile`
@@ -56,8 +64,9 @@ pub struct ExecutorBackend {
     /// `{prompt}`, `{worktree}`, `{order_file}`, `{prompt_file}`. Elements are
     /// never shell-joined, so vendor greedy-flag orderings survive verbatim.
     pub argv: Vec<String>,
-    #[serde(default)]
-    pub prompt: PromptRouting,
+    /// Absent means "inherit" when a same-name executor exists in an earlier
+    /// config layer, and defaults to `arg` otherwise (see `routing()`).
+    pub prompt: Option<PromptRouting>,
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub env_required: Vec<String>,
@@ -65,6 +74,52 @@ pub struct ExecutorBackend {
     /// codex, "tokens used"). The first number after the marker's last
     /// occurrence is recorded as the order's token usage.
     pub usage_marker: Option<String>,
+    /// Substring marking the executor's session identifier in its output
+    /// (codex prints "session id:"). The token after the marker's last
+    /// occurrence is captured so revisions can resume the same session.
+    pub session_marker: Option<String>,
+    /// Alternate argv used for revision attempts when a session id was
+    /// captured: same placeholders as `argv` plus `{session_id}`. Empty means
+    /// revisions run with a fresh context and the full charter.
+    #[serde(default)]
+    pub resume_argv: Vec<String>,
+}
+
+impl ExecutorBackend {
+    pub fn routing(&self) -> PromptRouting {
+        self.prompt.unwrap_or_default()
+    }
+}
+
+/// Field-level inheritance: a repo override that names an executor the global
+/// config already defines changes only the fields it sets. Replacing whole
+/// tables silently dropped inherited wiring (a repo pinning a model lost the
+/// global session_marker/resume_argv). An explicit empty string CLEARS an
+/// inherited marker ("no usage capture here"); clearing session_marker also
+/// neutralizes an inherited resume_argv, since no session is ever captured.
+fn merge_backend(base: &mut ExecutorBackend, over: ExecutorBackend) {
+    fn marker(base: &mut Option<String>, over: Option<String>) {
+        *base = match over {
+            Some(value) if value.is_empty() => None,
+            Some(value) => Some(value),
+            None => base.take(),
+        };
+    }
+    if !over.argv.is_empty() {
+        base.argv = over.argv;
+    }
+    if over.prompt.is_some() {
+        base.prompt = over.prompt;
+    }
+    base.timeout_secs = over.timeout_secs.or(base.timeout_secs);
+    if !over.env_required.is_empty() {
+        base.env_required = over.env_required;
+    }
+    marker(&mut base.usage_marker, over.usage_marker);
+    marker(&mut base.session_marker, over.session_marker);
+    if !over.resume_argv.is_empty() {
+        base.resume_argv = over.resume_argv;
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -139,6 +194,22 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .or(self.fail_fast)
+            .filter(|n| *n > 0)
+    }
+
+    pub fn revise(&self) -> usize {
+        std::env::var("SUMMONER_REVISE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or(self.revise)
+            .unwrap_or(0)
+    }
+
+    pub fn run_token_budget(&self) -> Option<u64> {
+        std::env::var("SUMMONER_RUN_TOKEN_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or(self.run_token_budget)
             .filter(|n| *n > 0)
     }
 }
@@ -224,11 +295,37 @@ fn merge(base: &mut Config, over: Config) {
     base.grove_bin = over.grove_bin.or(base.grove_bin.take());
     base.keep_failed_worktrees = over.keep_failed_worktrees.or(base.keep_failed_worktrees);
     base.fail_fast = over.fail_fast.or(base.fail_fast);
+    base.revise = over.revise.or(base.revise);
+    base.run_token_budget = over.run_token_budget.or(base.run_token_budget);
     // Per-name override: a repo redefining `codex` wins, while executors only
     // the global file defines stay available.
-    base.executors.extend(over.executors);
+    for (name, backend) in over.executors {
+        match base.executors.entry(name) {
+            std::collections::btree_map::Entry::Occupied(mut existing) => {
+                merge_backend(existing.get_mut(), backend);
+            }
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(backend);
+            }
+        }
+    }
     base.profile = over.profile.or(base.profile.take());
-    base.profiles.extend(over.profiles);
+    for (name, profile) in over.profiles {
+        match base.profiles.entry(name) {
+            std::collections::btree_map::Entry::Occupied(mut existing) => {
+                let existing = existing.get_mut();
+                existing.default_executor = profile
+                    .default_executor
+                    .or(existing.default_executor.take());
+                existing.default_reviewer = profile
+                    .default_reviewer
+                    .or(existing.default_reviewer.take());
+            }
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(profile);
+            }
+        }
+    }
 }
 
 /// Which profile this invocation selects: an explicit flag, then the
@@ -348,10 +445,12 @@ mod tests {
     fn backend(argv: &[&str]) -> ExecutorBackend {
         ExecutorBackend {
             argv: argv.iter().map(|s| s.to_string()).collect(),
-            prompt: PromptRouting::Arg,
+            prompt: Some(PromptRouting::Arg),
             timeout_secs: None,
             env_required: Vec::new(),
             usage_marker: None,
+            session_marker: None,
+            resume_argv: Vec::new(),
         }
     }
 
@@ -365,13 +464,33 @@ mod tests {
         base.executors.insert("glm".into(), backend(&["opencode"]));
         base.executors.insert("codex".into(), backend(&["codex"]));
 
+        base.executors.get_mut("codex").unwrap().session_marker = Some("session id:".into());
+        base.executors.get_mut("codex").unwrap().resume_argv =
+            vec!["codex".into(), "resume".into()];
+        base.profiles.insert(
+            "claude".into(),
+            Profile {
+                default_executor: Some("codex".into()),
+                default_reviewer: Some("codex-review".into()),
+            },
+        );
+
         let mut over = Config {
             max_parallel: Some(2),
             keep_failed_worktrees: Some(true),
             ..Config::default()
         };
-        over.executors
-            .insert("codex".into(), backend(&["codex", "exec"]));
+        // A repo override that only pins argv: everything else inherits.
+        let mut pinned = backend(&["codex", "exec", "-m", "terra"]);
+        pinned.prompt = None;
+        over.executors.insert("codex".into(), pinned);
+        over.profiles.insert(
+            "claude".into(),
+            Profile {
+                default_executor: None,
+                default_reviewer: Some("glm-review".into()),
+            },
+        );
         merge(&mut base, over);
 
         assert_eq!(base.max_parallel, Some(2));
@@ -379,8 +498,29 @@ mod tests {
         // Global settings survive where the repo file is silent.
         assert_eq!(base.default_executor.as_deref(), Some("glm"));
         assert_eq!(base.executors["glm"].argv, ["opencode"]);
-        // Same-name executor is replaced whole, not field-merged.
-        assert_eq!(base.executors["codex"].argv, ["codex", "exec"]);
+        // Same-name executors and profiles merge by field: the repo changes
+        // what it names, the global base supplies the rest.
+        let codex = &base.executors["codex"];
+        assert_eq!(codex.argv, ["codex", "exec", "-m", "terra"]);
+        assert_eq!(codex.session_marker.as_deref(), Some("session id:"));
+        assert_eq!(codex.resume_argv, ["codex", "resume"]);
+        assert_eq!(codex.routing(), PromptRouting::Arg, "inherited default");
+
+        // An explicit empty marker CLEARS the inherited one.
+        let mut muted = Config::default();
+        let mut clear = backend(&[]);
+        clear.prompt = None;
+        clear.session_marker = Some(String::new());
+        muted.executors.insert("codex".into(), clear);
+        merge(&mut base, muted);
+        assert_eq!(base.executors["codex"].session_marker, None);
+        assert_eq!(
+            base.executors["codex"].argv,
+            ["codex", "exec", "-m", "terra"]
+        );
+        let claude = &base.profiles["claude"];
+        assert_eq!(claude.default_reviewer.as_deref(), Some("glm-review"));
+        assert_eq!(claude.default_executor.as_deref(), Some("codex"));
     }
 
     #[test]
@@ -416,7 +556,7 @@ mod tests {
         )
         .unwrap();
         let fake = &cfg.executors["fake"];
-        assert_eq!(fake.prompt, PromptRouting::Stdin);
+        assert_eq!(fake.routing(), PromptRouting::Stdin);
         assert_eq!(fake.env_required, ["FAKE_KEY"]);
         assert_eq!(fake.timeout_secs, None);
 
@@ -427,7 +567,8 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(cfg.executors["plain"].prompt, PromptRouting::Arg);
+        assert_eq!(cfg.executors["plain"].routing(), PromptRouting::Arg);
+        assert_eq!(cfg.executors["plain"].prompt, None);
     }
 
     #[test]
