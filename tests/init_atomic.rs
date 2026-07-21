@@ -114,8 +114,11 @@ fn concurrent_global_replacement_is_preserved_with_original_error_context() {
 
     let failed = fixture.run(true, true);
     assert_concurrent_error(&failed);
+    // The Windows fake grove writes via cmd `echo`, which emits CRLF.
     assert_eq!(
-        std::fs::read_to_string(fixture.global()).unwrap(),
+        std::fs::read_to_string(fixture.global())
+            .unwrap()
+            .replace("\r\n", "\n"),
         "# concurrent\nmax_parallel = 7\n"
     );
 }
@@ -127,8 +130,11 @@ fn concurrent_replacement_of_generated_global_is_preserved() {
 
     let failed = fixture.run(true, true);
     assert_concurrent_error(&failed);
+    // The Windows fake grove writes via cmd `echo`, which emits CRLF.
     assert_eq!(
-        std::fs::read_to_string(fixture.global()).unwrap(),
+        std::fs::read_to_string(fixture.global())
+            .unwrap()
+            .replace("\r\n", "\n"),
         "# concurrent\nmax_parallel = 7\n"
     );
 }
