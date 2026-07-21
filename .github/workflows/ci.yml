@@ -47,29 +47,44 @@ jobs:
         with:
           tool: nextest@0.9.140
           fallback: none
-      # Grove has no published release yet; install from source at the exact
-      # commit the compatibility contract targets. Restore the checksum-verified
-      # artifact install with the first Grove GitHub release.
-      - name: Install Grove at the pinned commit (Unix)
+      - name: Install exact Grove 0.3.4 artifact (Unix)
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.4
         run: |
           set -euo pipefail
-          cargo install --git https://github.com/thomgardiner/grove \
-            --rev b5ca0388b749ae1afb6df6b6ccb21821e7ae1f52 --locked \
-            --root "${RUNNER_TEMP}/grove"
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) target=x86_64-unknown-linux-musl ;;
+            Darwin-arm64) target=aarch64-apple-darwin ;;
+            Darwin-x86_64) target=x86_64-apple-darwin ;;
+            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          archive="grove-${target}.tar.xz"
+          curl --proto '=https' --tlsv1.2 -fLsS -O "${GROVE_RELEASE}/${archive}"
+          curl --proto '=https' --tlsv1.2 -fLsS -O "${GROVE_RELEASE}/${archive}.sha256"
+          shasum -a 256 -c "${archive}.sha256"
+          mkdir -p "${RUNNER_TEMP}/grove/bin"
+          tar -xJf "${archive}" -C "${RUNNER_TEMP}/grove/bin" --strip-components 1
           echo "${RUNNER_TEMP}/grove/bin" >> "${GITHUB_PATH}"
           echo "SUMMONER_TEST_GROVE=${RUNNER_TEMP}/grove/bin/grove" >> "${GITHUB_ENV}"
-      - name: Install Grove at the pinned commit (Windows)
+      - name: Install exact Grove 0.3.4 artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cargo install --git https://github.com/thomgardiner/grove `
-            --rev b5ca0388b749ae1afb6df6b6ccb21821e7ae1f52 --locked `
-            --root (Join-Path $env:RUNNER_TEMP "grove")
+          $release = "https://github.com/thomgardiner/grove/releases/download/v0.3.4"
+          $archive = "grove-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest "$release/$archive" -OutFile $archive
+          Invoke-WebRequest "$release/$archive.sha256" -OutFile "$archive.sha256"
+          $expected = (Get-Content "$archive.sha256").Split()[0].ToLowerInvariant()
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Grove archive checksum mismatch" }
           $bin = Join-Path $env:RUNNER_TEMP "grove/bin"
-          $bin | Out-File $env:GITHUB_PATH -Append
-          "SUMMONER_TEST_GROVE=$(Join-Path $bin 'grove.exe')" | Out-File $env:GITHUB_ENV -Append
+          Expand-Archive $archive -DestinationPath $bin
+          $exe = Get-ChildItem $bin -Recurse -File -Filter grove.exe | Select-Object -First 1
+          if ($null -eq $exe) { throw "grove.exe missing from archive" }
+          $exe.DirectoryName | Out-File $env:GITHUB_PATH -Append
+          "SUMMONER_TEST_GROVE=$($exe.FullName)" | Out-File $env:GITHUB_ENV -Append
       - name: Prove exact Grove version and capabilities (Unix)
         if: runner.os != 'Windows'
         shell: bash
