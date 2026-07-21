@@ -42,6 +42,10 @@ pub(crate) fn finalize(
         report.stderr_tail = executor::tail(Path::new(path), TAIL_BYTES);
     }
 
+    // A hard kill during cleanup must not erase a completed Grove gate. Resume
+    // still requires Grove's durable task status to agree with this checkpoint.
+    let _ = ctx.events.emit_report("order_checkpoint", report);
+
     if let Some(reason) = abandon_reason
         && let Err(error) = ctx.grove.task_abandon(worktree, task_id, reason)
     {

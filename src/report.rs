@@ -2,14 +2,14 @@
 //! Ranked worst-first so the reviewer reads failures before successes.
 
 use crate::grove::{TaskVerification, VerifySummary};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Variant order is the ranking: worst first. The derived `Ord` drives the
 /// report sort, so do not reorder casually.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// Summoner-side failure (acquire failed, grove unreachable mid-run).
@@ -44,25 +44,6 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    pub fn from_key(key: &str) -> Option<Outcome> {
-        Some(match key {
-            "error" => Outcome::Error,
-            "blocked" => Outcome::Blocked,
-            "stalled" => Outcome::Stalled,
-            "executor_failed" => Outcome::ExecutorFailed,
-            "scope_violation" => Outcome::ScopeViolation,
-            "unverified" => Outcome::Unverified,
-            "review_failed" => Outcome::ReviewFailed,
-            "rejected" => Outcome::Rejected,
-            "interrupted" => Outcome::Interrupted,
-            "skipped" => Outcome::Skipped,
-            "completed" => Outcome::Completed,
-            "verified" => Outcome::Verified,
-            "approved" => Outcome::Approved,
-            _ => return None,
-        })
-    }
-
     pub fn key(self) -> &'static str {
         match self {
             Outcome::Error => "error",
@@ -142,7 +123,7 @@ impl RunReport {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct OrderReport {
     pub id: String,
     pub outcome: Outcome,
@@ -177,14 +158,14 @@ pub struct OrderReport {
     pub variant_of: Option<String>,
     /// Deterministic diff-scan findings (deleted tests, skip markers, config
     /// edits) surfaced to the reviewer and the orchestrator alike.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tripwires: Vec<String>,
     /// The independent review, when a reviewer gated this order.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewSummary>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verify: Vec<VerifySummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish: Option<TaskVerification>,
@@ -244,7 +225,7 @@ impl OrderReport {
 
 /// One independent review: which backend judged, what it said, and where its
 /// full transcript lives.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ReviewSummary {
     pub reviewer: String,
     /// "approve", "reject", or "failed" (no valid verdict was produced).
@@ -252,7 +233,7 @@ pub struct ReviewSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// The reviewer's findings, verbatim (severity/file/line/summary objects).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit: Option<i32>,
@@ -263,7 +244,7 @@ pub struct ReviewSummary {
     pub stderr_log: Option<String>,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct DiffStats {
     pub files_changed: u64,
     pub insertions: u64,
@@ -271,7 +252,7 @@ pub struct DiffStats {
     pub uncommitted_files: u64,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct Timing {
     pub exec_secs: u64,
     pub verify_secs: u64,

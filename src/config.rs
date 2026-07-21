@@ -7,9 +7,20 @@
 //! knowledge; presets ship only in the starter file `summoner init` writes.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+thread_local! { static SELECTED_PROFILE: RefCell<Option<String>> = const { RefCell::new(None) }; }
+
+pub fn selected_profile(selected: Option<&str>) {
+    SELECTED_PROFILE.with(|profile| profile.replace(selected.map(String::from)));
+}
+
+pub fn profile() -> Option<String> {
+    SELECTED_PROFILE.with(|profile| profile.borrow().clone())
+}
 
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default, deny_unknown_fields)]
@@ -46,6 +57,8 @@ pub struct Config {
     /// auto-detected from the harness's environment markers (CLAUDECODE ->
     /// "claude", CODEX_HOME/CODEX_SANDBOX -> "codex").
     pub profiles: BTreeMap<String, Profile>,
+    #[serde(skip)]
+    pub(crate) frozen: bool,
 }
 
 /// One orchestrator's defaults. Executors themselves stay shared; a profile
@@ -142,41 +155,59 @@ pub enum PromptRouting {
 #[derive(Serialize)]
 pub struct Resolved {
     pub sources: Vec<String>,
+    #[serde(skip)]
+    pub selected_profile: Option<String>,
     #[serde(flatten)]
     pub config: Config,
 }
 
 impl Config {
+    fn env<T>(&self, read: impl FnOnce() -> Option<T>) -> Option<T> {
+        if self.frozen { None } else { read() }
+    }
+
+    pub(crate) fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
     pub fn default_executor(&self) -> Option<String> {
-        std::env::var("SUMMONER_DEFAULT_EXECUTOR")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| self.default_executor.clone())
+        self.env(|| {
+            std::env::var("SUMMONER_DEFAULT_EXECUTOR")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .or_else(|| self.default_executor.clone())
     }
 
     pub fn default_reviewer(&self) -> Option<String> {
-        std::env::var("SUMMONER_DEFAULT_REVIEWER")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| self.default_reviewer.clone())
+        self.env(|| {
+            std::env::var("SUMMONER_DEFAULT_REVIEWER")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .or_else(|| self.default_reviewer.clone())
     }
 
     pub fn max_parallel(&self) -> usize {
-        std::env::var("SUMMONER_MAX_PARALLEL")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .or(self.max_parallel)
-            .filter(|n| *n > 0)
-            .unwrap_or(2)
+        self.env(|| {
+            std::env::var("SUMMONER_MAX_PARALLEL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .or(self.max_parallel)
+        .filter(|n| *n > 0)
+        .unwrap_or(2)
     }
 
     pub fn order_timeout_secs(&self) -> u64 {
-        std::env::var("SUMMONER_ORDER_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .or(self.order_timeout_secs)
-            .filter(|n| *n > 0)
-            .unwrap_or(600)
+        self.env(|| {
+            std::env::var("SUMMONER_ORDER_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .or(self.order_timeout_secs)
+        .filter(|n| *n > 0)
+        .unwrap_or(600)
     }
 
     pub fn grove_bin(&self) -> String {
@@ -188,33 +219,39 @@ impl Config {
     }
 
     pub fn keep_failed_worktrees(&self) -> bool {
-        env_bool("SUMMONER_KEEP_FAILED_WORKTREES")
+        self.env(|| env_bool("SUMMONER_KEEP_FAILED_WORKTREES"))
             .or(self.keep_failed_worktrees)
             .unwrap_or(false)
     }
 
     pub fn fail_fast(&self) -> Option<usize> {
-        std::env::var("SUMMONER_FAIL_FAST")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .or(self.fail_fast)
-            .filter(|n| *n > 0)
+        self.env(|| {
+            std::env::var("SUMMONER_FAIL_FAST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .or(self.fail_fast)
+        .filter(|n| *n > 0)
     }
 
     pub fn revise(&self) -> usize {
-        std::env::var("SUMMONER_REVISE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .or(self.revise)
-            .unwrap_or(0)
+        self.env(|| {
+            std::env::var("SUMMONER_REVISE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .or(self.revise)
+        .unwrap_or(0)
     }
 
     pub fn run_token_budget(&self) -> Option<u64> {
-        std::env::var("SUMMONER_RUN_TOKEN_BUDGET")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .or(self.run_token_budget)
-            .filter(|n| *n > 0)
+        self.env(|| {
+            std::env::var("SUMMONER_RUN_TOKEN_BUDGET")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .or(self.run_token_budget)
+        .filter(|n| *n > 0)
     }
 }
 
@@ -424,7 +461,11 @@ fn load_from(cwd: &Path) -> Resolved {
         merge(&mut config, repo);
         sources.push(path.display().to_string());
     }
-    Resolved { sources, config }
+    Resolved {
+        sources,
+        selected_profile: None,
+        config,
+    }
 }
 
 /// Parse a boolean environment variable, accepting the common spellings. Unset

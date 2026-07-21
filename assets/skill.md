@@ -22,7 +22,7 @@ outcomes. Everything between is Summoner's job.
    scope  = ["crate:auth-core", "src/api/token.rs"]   # paths or crate:<name>
    acceptance     = ["grove verify fast passes", "no new public API"]
    verify_profile = "fast"                   # optional; grove profile to run
-   executor       = "glm"                    # optional; else config default
+   executor       = "agent-a"                # optional; else config default
    timeout_secs   = 900                      # optional
    ```
 
@@ -33,7 +33,7 @@ outcomes. Everything between is Summoner's job.
    `after = ["<id>"]` (one run executes the DAG; dependents of failures are
    skipped), and an order that builds on a dependency's changes also sets
    `base = "grove/smn-<dep-id>"`. For a hard or ambiguous order, set
-   `variants = ["glm", "codex"]` instead of `executor`: each named executor
+   `variants = ["agent-a", "agent-b"]` instead of `executor`: each named executor
    attempts the order independently on its own branch (same scope, shared
    claim group), and you review the attempts and land the best one.
 
@@ -51,7 +51,7 @@ outcomes. Everything between is Summoner's job.
 
 3. **Dispatch.** `summoner run orders/`. Orders run in parallel (config
    `max_parallel`), each in its own grove worktree and task. Mixing executors
-   (GLM, Codex, Claude, anything configured) in one run is normal. For long
+   (any configured CLI or model) in one run is normal. For long
    fleets, `--stream` emits NDJSON lifecycle events as they happen (the
    `order_dispatched` event carries the log paths to tail) and ends with a
    `report` event instead of the pretty report.
@@ -65,10 +65,8 @@ outcomes. Everything between is Summoner's job.
    requirements only — and lands as `approved` or `rejected` with findings;
    deterministic `tripwires` (deleted tests, skip markers, verification-config
    edits) ride in each entry. `[profiles.<name>]` config tables pick the
-   executor/reviewer matrix per orchestrator; running from Claude Code
-   auto-selects `[profiles.claude]` when it exists (or pass
-   `--profile <name>`, or pin one machine-wide with `profile = "<name>"`
-   in the global config).
+   executor/reviewer policy for an invoking environment; select one with
+   `--profile <name>`, `SUMMONER_PROFILE`, or a config pin.
    Each order carries its branch, diff stats, verification receipts, acceptance
    criteria, and log tails. Review the diff on the order's branch against its
    acceptance criteria before landing anything. Re-dispatch failures with a
@@ -81,6 +79,14 @@ outcomes. Everything between is Summoner's job.
    and per-order `max_tokens` bound the spend; `summoner watch` shows the
    fleet live. Before decomposing, check `summoner scorecard` — pick
    executors from their per-repo track record, not habit.
+
+5. **Recover.** `summoner resume <run-id>` uses the run-owned immutable
+   manifest and authoritative journal; do not recreate or edit the original
+   orders first. It carries only `verified`/`approved` work whose finished
+   Grove task agrees, and reruns everything else on its recorded branch and
+   executor session. If a nonterminal Grove task still owns the work, resume
+   stops instead of dispatching a duplicate; wait for it or abandon it
+   explicitly, then retry.
 
 ## Rules
 

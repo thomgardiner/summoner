@@ -50,18 +50,28 @@ pub fn parse_verdict(output: &str) -> Option<ParsedReview> {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let verdict = match value["verdict"].as_str() {
-            Some("approve") => Verdict::Approve,
-            Some("reject") => Verdict::Reject,
+        let approved = match value["verdict"].as_str() {
+            Some("approve") => true,
+            Some("reject") => false,
             _ => continue,
         };
-        let findings = value["findings"]
-            .as_array()
+        let raw_findings = value["findings"].as_array();
+        let has_blocker = raw_findings.is_some_and(|findings| {
+            findings
+                .iter()
+                .any(|finding| finding["severity"].as_str() == Some("blocker"))
+        });
+        let findings = raw_findings
             .cloned()
             .unwrap_or_default()
             .into_iter()
             .take(50)
             .collect();
+        let verdict = if approved && !has_blocker {
+            Verdict::Approve
+        } else {
+            Verdict::Reject
+        };
         return Some(ParsedReview { verdict, findings });
     }
     None
@@ -248,6 +258,24 @@ more narration
             "trailing diagnostics\n".repeat(VERDICT_WINDOW)
         );
         assert!(parse_verdict(&buried).is_none());
+    }
+
+    #[test]
+    fn approval_with_a_blocker_fails_closed() {
+        let output = r#"{"verdict":"approve","findings":[{"severity":"blocker","file":"src/main.rs","line":1,"summary":"unsafe result"}]}"#;
+
+        let parsed = parse_verdict(output).expect("verdict parses");
+
+        assert!(matches!(parsed.verdict, Verdict::Reject));
+        assert_eq!(parsed.findings.len(), 1);
+
+        let mut findings = vec![serde_json::json!({"severity": "minor"}); 50];
+        findings.push(serde_json::json!({"severity": "blocker"}));
+        let output = serde_json::json!({"verdict": "approve", "findings": findings}).to_string();
+        let parsed = parse_verdict(&output).expect("capped verdict parses");
+
+        assert!(matches!(parsed.verdict, Verdict::Reject));
+        assert_eq!(parsed.findings.len(), 50);
     }
 
     #[test]

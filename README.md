@@ -1,6 +1,6 @@
 # Summoner
 
-Summoner is a fleet runner for LLM coding agents. The invoking session—Claude Code, Codex, or another harness—acts as the orchestrator: it writes work orders, and Summoner deterministically dispatches executor CLIs in grove-managed worktrees and returns one ranked JSON report.
+Summoner is a model-neutral fleet runner for coding-agent CLIs. The invoking harness acts as the orchestrator: it writes work orders, and Summoner deterministically dispatches configured executors in grove-managed worktrees and returns one ranked JSON report.
 
 ## Install
 
@@ -10,7 +10,7 @@ From this repository:
 cargo install --path .
 ```
 
-Summoner also requires the `grove` binary and at least one configured executor CLI.
+Summoner also requires a `grove` binary with task-status JSON schema 2 and at least one configured executor CLI. `summoner doctor` checks this before any fleet dispatch.
 
 ## Usage
 
@@ -47,7 +47,7 @@ brief = "Document installation, configuration, and the fleet workflow."
 scope = ["README.md"]
 acceptance = ["README.md is complete", "documentation checks pass"]
 verify_profile = "fast"
-executor = "codex"
+executor = "agent"
 timeout_secs = 900
 ```
 
@@ -69,7 +69,13 @@ Summoner validates all orders before dispatch, runs up to the configured concurr
 
 ### 5. Read the report
 
-The same JSON is saved as `report.json` under `$XDG_CACHE_HOME/summoner/runs/<run-id>/`, or under the equivalent home-cache or temporary directory fallback. Every run also appends lifecycle events (`run_started`, `order_started`, `order_dispatched`, `order_exec_done`, `order_verify`, `review_started`, `order_review`, `order_finished`, `run_finished`) to `events.jsonl` in that directory; `summoner run --stream` mirrors them to stdout as NDJSON, ending with a single `report` event carrying the complete ranked report, so any consumer — an orchestrating session, an IDE, `tail -f` — can watch a fleet live. The `order_dispatched` event names the grove task, worktree, and log paths to follow, and `review_started` names the reviewer's logs so the gate is tailable the moment it spawns.
+The same JSON is saved as `report.json` under `$XDG_CACHE_HOME/summoner/runs/<run-id>/`, or under the equivalent home-cache or temporary directory fallback. Every run also appends lifecycle events (`run_started`, `order_started`, `order_dispatched`, `order_exec_done`, `order_verify`, `review_started`, `order_review`, `order_checkpoint`, `order_finished`, `run_finished`) to `events.jsonl` in that directory; `summoner run --stream` mirrors them to stdout as NDJSON, ending with a single `report` event carrying the complete ranked report, so any consumer — an orchestrating session, an IDE, `tail -f` — can watch a fleet live. The `order_dispatched` event names the grove task, worktree, and log paths to follow, and `review_started` names the reviewer's logs so the gate is tailable the moment it spawns.
+
+### Durable runs and recovery
+
+Each run directory is a versioned evidence bundle: `manifest.json` and `report.json` are create-once snapshots, while `events.jsonl` is append-only. The manifest records the exact expanded orders, effective non-secret settings, resolved executor/reviewer roles, and selected backend definitions before dispatch. Required environment-variable names are recorded; credential values are not. Journal records are sequenced and flushed before their streamed copies, and a journal failure stops further dispatch. `order_checkpoint` preserves the full gate result before worktree cleanup. `report.json` is created only after `run_finished` and is projected from terminal journal records, so a hard-killed run may correctly have no report.
+
+`summoner resume <run-id>` reads the run-owned manifest and journal, not the original order files or current executor defaults. It reconciles every recorded task with Grove's durable status. Only `verified` and `approved` results with matching finished Grove verification are carried; every non-green result, including `completed`, is rerun on its recorded branch. Recorded executor sessions are reused when the backend defines `resume_argv`. A nonterminal Grove task (`active`, `idle`, `stalled`, or `failed`) blocks resume with a retry-later error so Summoner never duplicates its claim or execution. Resolve or explicitly abandon that task, then retry the same resume command.
 
 `summoner watch` renders a live terminal board over the latest run's events (or `summoner watch <run-id>`): one row per order with phase, attempt, branch, elapsed time, and token usage, exiting when the run finishes. Finished rows carry attach handles: the branch holds the work and the session id (when captured) resumes the executor's context.
 
@@ -81,26 +87,27 @@ The same JSON is saved as `report.json` under `$XDG_CACHE_HOME/summoner/runs/<ru
 
 Budgets are enforced two ways. `run_token_budget = N` (or `SUMMONER_RUN_TOKEN_BUDGET`) is a run-wide breaker over live spend: usage counts against it the moment it is scraped from any attempt or review on any worker, the remaining queue lands as `skipped` once crossed, and the revision loop stops revising. A per-order `max_tokens` blocks revisions once reached and calls the overage out in its report entry; an order can only set it when its executor defines a `usage_marker`, or the cap could never be measured (validation refuses the combination). Usage is only knowable after an executor exits, so one in-flight attempt can overshoot before the breaker sees it; the grove deadline remains the hard stop for a runaway process.
 
-Fleet control: `fail_fast = N` in `.summoner.toml` skips the remaining queue after N orders fail. An executor with a `usage_marker` (codex prints `tokens used`) gets its token count recorded per order and summed per run. `summoner resume <run-id>` re-runs an earlier fleet: orders that reached `verified`, `approved`, or `completed` carry over, and the rest dispatch again on their original branches, continuing from whatever grove salvaged. Orders are ranked worst-first, with ties sorted by ID. Review non-green outcomes, log tails, diffs, conflicts, and verification receipts before accepting executor work. `summoner status` prints Summoner-owned grove tasks as JSON.
+Fleet control: `fail_fast = N` in `.summoner.toml` skips the remaining queue after N orders fail. An executor with a `usage_marker` gets its token count recorded per order and summed per run. Orders are ranked worst-first, with ties sorted by ID. Review non-green outcomes, log tails, diffs, conflicts, and verification receipts before accepting executor work. `summoner status` prints Summoner-owned grove tasks as JSON.
 
 ## Review gate
 
-Set `default_reviewer = "<executor name>"` (or per-order `reviewer`; `reviewer = "none"` opts an order out) and every order that verifies is judged by an independent reviewer before it counts as green. The reviewer is any configured executor, spawned fresh in the order's worktree under the same grove supervision, prompted with the review charter, the order's brief and acceptance criteria, and the live diff since base (staged and unstaged included, untracked files listed) — deliberately never the implementing executor's transcript, and ideally a different vendor than the implementer (summoner warns when they match). Its last output line must be `{"verdict":"approve"|"reject","findings":[...]}`. Approve upgrades `verified` to `approved`; reject lands the order as `rejected` with the findings in the report (the work stays finished and salvaged on its branch for re-dispatch). A reviewer that modifies the worktree has its writes undone and its verdict voided (`review_failed`). Configure reviewer CLIs read-only (tool allowlists, read-only sandbox modes); the gate enforces it after the fact.
+Set `default_reviewer = "<executor name>"` (or per-order `reviewer`; `reviewer = "none"` opts an order out) and every order that verifies is judged by an independently configured reviewer before it counts as green. The reviewer is any configured executor, spawned fresh in the order's worktree under the same grove supervision, prompted with the review charter, the order's brief and acceptance criteria, and the live diff since base (staged and unstaged included, untracked files listed) — deliberately never the implementing executor's transcript. Summoner warns when implementation and review select the same backend. The reviewer's last output line must be `{"verdict":"approve"|"reject","findings":[...]}`. Approve upgrades `verified` to `approved`; reject lands the order as `rejected` with the findings in the report. A reviewer that modifies the worktree has its writes undone and its verdict voided (`review_failed`). Configure reviewer CLIs read-only; the gate enforces that boundary again after execution.
 
 ## Orchestrator profiles
 
-Different orchestrators want different vendor matrices: when Claude Code drives the fleet you likely want codex implementing and reviewing (and vice versa), so no vendor judges its own work and no subscription is double-billed for both orchestration and execution. Declare the matrix once:
+Profiles are named overlays for executor and reviewer defaults. They let different invoking environments select different policies without putting a vendor into Summoner's dispatch logic:
 
 ```toml
-[profiles.claude]          # when Claude Code invokes summoner
-default_reviewer = "codex-review"
+[profiles.interactive]
+default_executor = "implement"
+default_reviewer = "review"
 
-[profiles.codex]           # when codex invokes summoner
-default_executor = "claude"
-default_reviewer = "claude-review"
+[profiles.automation]
+default_executor = "batch"
+default_reviewer = "audit"
 ```
 
-A profile only overrides `default_executor` and `default_reviewer`; executors stay shared. Inheritance is layered and field-level throughout: the global config's top-level keys are the base every project inherits, `[profiles.<name>]` layers per-orchestrator deltas on top, and a repo's `.summoner.toml` overrides exactly the fields it names — a repo `[executors.codex]` that only pins a model keeps the global entry's session and resume wiring, and a repo `[profiles.claude]` that only changes the reviewer keeps the global profile's executor. An explicit empty string clears an inherited marker (`usage_marker = ""` disables usage capture locally; clearing `session_marker` also neutralizes an inherited `resume_argv`, since no session is ever captured). Selection, highest first: `summoner run --profile <name>`, then `SUMMONER_PROFILE`, then a `profile = "<name>"` pin in config ("always use this matrix"; a global pin covers the machine, a repo pin overrides it), then auto-detection from the invoking harness's environment markers (`CLAUDECODE` selects `claude`, `CODEX_SANDBOX` selects `codex`). Auto-detection applies only when the config defines a matching profile, so it is inert until you opt in. Nested harnesses (codex spawned from a Claude Code shell, or the reverse) leave both markers, which is ambiguous: detection then selects nothing and summoner says so on stderr — use a pin, the flag, or the env variable in nested setups. Naming a profile that does not exist, whether by flag, env, or pin, is an error. `summoner config` lists the applied profile in `sources`.
+A profile only overrides `default_executor` and `default_reviewer`; executors stay shared. Inheritance is layered and field-level: global config is the base, `[profiles.<name>]` overlays it, and repository config overrides only the fields it names. An explicit empty string clears an inherited marker. Selection, highest first: `--profile <name>`, `SUMMONER_PROFILE`, then a `profile = "<name>"` config pin. As opt-in conveniences, harness markers select profiles named `claude` or `codex` only when those profiles exist; if both markers are present, selection is left explicit. Naming an absent profile is an error. `summoner config` lists the applied profile in `sources`.
 
 Anti-reward-hacking runs before the reviewer does: summoner scans the diff deterministically and reports `tripwires` per order — deleted test files, added skip markers (`#[ignore]`, `.skip(`), net assertion loss, Cargo `[profile]` edits. Touching verification config itself (`.grove.toml`, `.summoner.toml`, `rust-toolchain*`, `.cargo/config*`) is a hard stop: the receipts a modified config produces are untrustworthy, so the order lands `unverified` and its task is abandoned, whatever the tests said.
 
@@ -127,13 +134,11 @@ Anti-reward-hacking runs before the reviewer does: summoner scans the diff deter
 Executors are argv templates; Summoner contains no vendor-specific dispatch logic and ships no presets — which agent CLIs you run, under which flags and accounts, is personal configuration. Define executors once in `~/.config/summoner/config.toml` (`summoner init --global` drops an annotated template there); a repo's `.summoner.toml` overrides same-named executors. An example:
 
 ```toml
-default_executor = "codex"
+default_executor = "agent"
 
-[executors.codex]
+[executors.agent]
 argv = [
-  "codex", "exec", "-s", "workspace-write", "-C", "{worktree}",
-  "-c", "sandbox_workspace_write.writable_roots=[\"{git_common_dir}\"]",
-  "--", "{prompt}",
+  "agent-cli", "run", "--worktree", "{worktree}", "--", "{prompt}",
 ]
 prompt = "arg"
 timeout_secs = 900

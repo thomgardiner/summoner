@@ -36,7 +36,16 @@ fn grove_available() -> bool {
         .chain(std::iter::repeat(0))
         .take(3)
         .collect();
-    (numbers[0], numbers[1], numbers[2]) >= (0, 3, 2)
+    if (numbers[0], numbers[1], numbers[2]) < (0, 3, 2) {
+        return false;
+    }
+    Command::new(grove_bin())
+        .args(["task", "status", "--json"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .is_some_and(|status| status["schema_version"] == 2)
 }
 
 macro_rules! require_grove {
@@ -182,12 +191,21 @@ impl Fixture {
     }
 
     fn summoner_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        let mut command = self.summoner_command(args, &grove_bin());
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command.output().expect("run summoner")
+    }
+
+    fn summoner_command(&self, args: &[&str], grove: &str) -> Command {
         let mut command = Command::new(SUMMONER);
         command
             .args(args)
             .current_dir(&self.repo)
-            .env("SUMMONER_GROVE_BIN", grove_bin())
+            .env("SUMMONER_GROVE_BIN", grove)
             .env("GROVE_CACHE_ROOT", self.base.path().join("cache"))
+            .env("XDG_CONFIG_HOME", self.base.path().join("config"))
             .env("XDG_CACHE_HOME", self.base.path().join("xdg"));
         // Hermetic against the harness running THIS test suite: profile
         // auto-detection must see only what each test opts into.
@@ -199,10 +217,7 @@ impl Fixture {
         ] {
             command.env_remove(marker);
         }
-        for (key, value) in envs {
-            command.env(key, value);
-        }
-        command.output().expect("run summoner")
+        command
     }
 
     fn grove(&self, args: &[&str]) -> Output {
@@ -1310,7 +1325,8 @@ fn resume_carries_successes_and_reruns_failures_on_their_branches() {
         &format!(
             "branch=$(git symbolic-ref --short HEAD)\n\
              case \"$branch\" in\n\
-               *smn-bad) test -f {flag} || exit 3\n\
+               *smn-bad) if [ ! -f {flag} ]; then echo 'SESSION=bad-session'; exit 3; fi\n\
+                         test \"$1\" = --resume && test \"$2\" = bad-session || exit 4\n\
                          echo 'pub fn bad() {{}}' > src/bad.rs ;;\n\
                *) echo 'pub fn good() {{}}' > src/good.rs ;;\n\
              esac\n\
@@ -1319,6 +1335,10 @@ fn resume_carries_successes_and_reruns_failures_on_their_branches() {
         ),
         60,
     );
+    fixture.append_config(&format!(
+        "session_marker = \"SESSION=\"\nresume_argv = [\"{}\", \"--resume\", \"{{session_id}}\"]",
+        fixture.base.path().join("fake-executor.sh").display()
+    ));
     let a = fixture.order(
         "a.toml",
         "id = \"good\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src/good.rs\"]\nverify_profile = \"fast\"\n",
@@ -1334,7 +1354,21 @@ fn resume_carries_successes_and_reruns_failures_on_their_branches() {
     let run_id = first["run_id"].as_str().unwrap();
 
     std::fs::write(&flag, "").unwrap();
-    let output = fixture.summoner(&["resume", run_id]);
+    // Recovery owns its inputs: remove both source orders and replace the
+    // current executor/defaults with a backend that would fail if consulted.
+    std::fs::remove_file(&a).unwrap();
+    std::fs::remove_file(&b).unwrap();
+    std::fs::write(
+        fixture.repo.join(".summoner.toml"),
+        "default_executor = \"poison\"\nmax_parallel = 9\n\n\
+         [executors.poison]\nargv = [\"false\"]\nprompt = \"stdin\"\n",
+    )
+    .unwrap();
+    fixture.commit_all("replace current summoner config");
+    let output = fixture.summoner_with_env(
+        &["resume", run_id],
+        &[("SUMMONER_MAX_PARALLEL", "7"), ("SUMMONER_REVISE", "4")],
+    );
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -1356,6 +1390,14 @@ fn resume_carries_successes_and_reruns_failures_on_their_branches() {
             .is_some_and(|d| d.contains("carried from run")),
         "{second}"
     );
+    let bad = second["orders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "bad")
+        .unwrap();
+    assert_eq!(bad["session_id"], "bad-session", "{second}");
+    assert_eq!(bad["attempts"], 2, "{second}");
     // The re-run continued the original branch.
     let show = Command::new("git")
         .args(["show", "grove/smn-bad:src/bad.rs"])
@@ -1363,6 +1405,287 @@ fn resume_carries_successes_and_reruns_failures_on_their_branches() {
         .output()
         .unwrap();
     assert!(show.status.success(), "{second}");
+
+    // The resumed run's own manifest retains the original resolved backend
+    // and settings, not the current file or SUMMONER_* tuning values.
+    let resumed_id = second["run_id"].as_str().unwrap();
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .base
+                .path()
+                .join("xdg/summoner/runs")
+                .join(resumed_id)
+                .join("manifest.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["settings"]["max_parallel"], 2, "{manifest}");
+    assert_eq!(manifest["settings"]["revise"], 0, "{manifest}");
+    assert!(manifest["backends"].get("fake").is_some(), "{manifest}");
+    assert!(manifest["backends"].get("poison").is_none(), "{manifest}");
+    for order in manifest["orders"].as_array().unwrap() {
+        assert_eq!(order["roles"]["executor"], "fake", "{manifest}");
+        assert!(
+            order["source_path"]
+                .as_str()
+                .is_some_and(|path| path.contains("resume-orders")),
+            "{manifest}"
+        );
+    }
+}
+
+#[test]
+fn hard_kill_after_grove_finish_recovers_without_report_or_source_order() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn recovered() {}' > src/recovered.rs\n\
+         git add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    let order = fixture.order(
+        "recover.toml",
+        "id = \"recover\"\ntitle = \"Recover\"\nbrief = \"Survive a hard kill.\"\n\
+         scope = [\"src/recovered.rs\"]\nverify_profile = \"fast\"\n",
+    );
+
+    // Hold only the first release call. This creates a deterministic kill
+    // point after Grove finished and Summoner flushed its full checkpoint,
+    // but before an order_finished event or report.json can exist.
+    let wrapper = fixture.base.path().join("grove-release-barrier.sh");
+    let blocked = fixture.base.path().join("release-blocked");
+    let proceed = fixture.base.path().join("release-proceed");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\n\
+         if [ \"$1\" = worktree ] && [ \"$2\" = release ] && [ ! -e \"$SUMMONER_RELEASE_PROCEED\" ]; then\n\
+           : > \"$SUMMONER_RELEASE_BLOCKED\"\n\
+           while [ ! -e \"$SUMMONER_RELEASE_PROCEED\" ]; do sleep 0.05; done\n\
+         fi\n\
+         exec \"$SUMMONER_REAL_GROVE\" \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command =
+        fixture.summoner_command(&["run", order.to_str().unwrap()], wrapper.to_str().unwrap());
+    command
+        .env("SUMMONER_REAL_GROVE", grove_bin())
+        .env("SUMMONER_RELEASE_BLOCKED", &blocked)
+        .env("SUMMONER_RELEASE_PROCEED", &proceed)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !blocked.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        blocked.exists(),
+        "Summoner never reached the release barrier"
+    );
+
+    let runs_root = fixture.base.path().join("xdg/summoner/runs");
+    let runs: Vec<PathBuf> = std::fs::read_dir(&runs_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(runs.len(), 1, "expected exactly one interrupted run");
+    let old_run = &runs[0];
+    let journal = std::fs::read_to_string(old_run.join("events.jsonl")).unwrap();
+    let checkpoint: Value = journal
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|event: &Value| event["event"] == "order_checkpoint")
+        .expect("durable pre-release checkpoint");
+    let worktree = PathBuf::from(checkpoint["report"]["worktree"].as_str().unwrap());
+    assert!(!old_run.join("report.json").exists());
+
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
+    }
+    std::fs::write(&proceed, "").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "the original run must be hard-killed"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while worktree.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        !worktree.exists(),
+        "Grove release did not complete after the kill"
+    );
+
+    // Neither mutable source orders nor current executor defaults participate
+    // in recovery. The checkpoint and matching Grove receipt carry the work.
+    std::fs::remove_file(&order).unwrap();
+    std::fs::write(
+        fixture.repo.join(".summoner.toml"),
+        "default_executor = \"poison\"\n[executors.poison]\nargv = [\"false\"]\nprompt = \"stdin\"\n",
+    )
+    .unwrap();
+    fixture.commit_all("replace current summoner config");
+    let run_id = old_run.file_name().unwrap().to_str().unwrap();
+    let resumed = fixture.summoner(&["resume", run_id]);
+    assert_eq!(
+        resumed.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let report: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(report["summary"]["verified"], 1, "{report}");
+    assert!(
+        report["orders"][0]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("carried from run")),
+        "{report}"
+    );
+
+    // A resumed run is itself replayable even when every order was carried.
+    let resumed_manifest: Value = serde_json::from_slice(
+        &std::fs::read(
+            runs_root
+                .join(report["run_id"].as_str().unwrap())
+                .join("manifest.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resumed_manifest["orders"].as_array().unwrap().len(), 1);
+    assert_eq!(resumed_manifest["orders"][0]["expanded"]["id"], "recover");
+}
+
+#[test]
+fn resume_refuses_to_duplicate_a_nonterminal_grove_task() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn held() {}' > src/held.rs\ngit add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    let order = fixture.order(
+        "held.toml",
+        "id = \"held\"\ntitle = \"Held\"\nbrief = \"Hold before execution.\"\n\
+         scope = [\"src/held.rs\"]\nverify_profile = \"fast\"\n",
+    );
+    let wrapper = fixture.base.path().join("grove-exec-barrier.sh");
+    let blocked = fixture.base.path().join("exec-blocked");
+    let proceed = fixture.base.path().join("exec-proceed");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\n\
+         if [ \"$1\" = task ] && [ \"$2\" = exec ]; then\n\
+           : > \"$SUMMONER_EXEC_BLOCKED\"\n\
+           while [ ! -e \"$SUMMONER_EXEC_PROCEED\" ]; do sleep 0.05; done\n\
+         fi\n\
+         exec \"$SUMMONER_REAL_GROVE\" \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command =
+        fixture.summoner_command(&["run", order.to_str().unwrap()], wrapper.to_str().unwrap());
+    command
+        .env("SUMMONER_REAL_GROVE", grove_bin())
+        .env("SUMMONER_EXEC_BLOCKED", &blocked)
+        .env("SUMMONER_EXEC_PROCEED", &proceed)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !blocked.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(blocked.exists(), "Summoner never reached the exec barrier");
+
+    let runs_root = fixture.base.path().join("xdg/summoner/runs");
+    let old_run = std::fs::read_dir(&runs_root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let journal = std::fs::read_to_string(old_run.join("events.jsonl")).unwrap();
+    let dispatched: Value = journal
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|event: &Value| event["event"] == "order_dispatched")
+        .expect("dispatch record");
+    let task_id = dispatched["task_id"].as_str().unwrap();
+    let run_id = old_run.file_name().unwrap().to_str().unwrap();
+    let duplicate = fixture.summoner(&["resume", run_id]);
+    assert_eq!(duplicate.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&duplicate.stderr);
+    assert!(error.contains("still owns Grove task"), "{error}");
+    assert!(error.contains(task_id), "{error}");
+    let status: Value =
+        serde_json::from_slice(&fixture.grove(&["task", "status", "--json"]).stdout).unwrap();
+    assert_eq!(status["tasks"].as_array().unwrap().len(), 1, "{status}");
+
+    std::fs::write(&proceed, "").unwrap();
+    let original = child.wait_with_output().unwrap();
+    assert_eq!(
+        original.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&original.stdout),
+        String::from_utf8_lossy(&original.stderr)
+    );
+}
+
+#[test]
+fn resume_fails_closed_when_green_journal_evidence_contradicts_grove() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "echo 'pub fn contradiction() {}' > src/contradiction.rs\n\
+         git add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    let order = fixture.order(
+        "contradiction.toml",
+        "id = \"contradiction\"\ntitle = \"Contradiction\"\nbrief = \"Create work.\"\n\
+         scope = [\"src/contradiction.rs\"]\nverify_profile = \"fast\"\n",
+    );
+    let report = fixture.run_report(&[&order], 0);
+    let run_id = report["run_id"].as_str().unwrap();
+    let journal_path = fixture
+        .base
+        .path()
+        .join("xdg/summoner/runs")
+        .join(run_id)
+        .join("events.jsonl");
+    let mut records: Vec<Value> = std::fs::read_to_string(&journal_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let terminal = records
+        .iter_mut()
+        .find(|record| record["event"] == "order_finished")
+        .unwrap();
+    terminal["report"]["finish"]["verified"] = Value::Bool(false);
+    let text = records
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n")
+        + "\n";
+    std::fs::write(&journal_path, text).unwrap();
+
+    let resumed = fixture.summoner(&["resume", run_id]);
+    assert_eq!(resumed.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&resumed.stderr);
+    assert!(
+        error.contains("disagrees with Grove verification"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1400,6 +1723,7 @@ fn streamed_run_emits_ndjson_events_and_a_final_report_line() {
         "order_dispatched",
         "order_exec_done",
         "order_verify",
+        "order_checkpoint",
         "order_finished",
         "run_finished",
     ] {

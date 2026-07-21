@@ -18,6 +18,11 @@ mod plan;
 mod report;
 mod review;
 mod run;
+mod run_evidence;
+mod run_journal;
+mod run_manifest;
+mod run_prepare;
+mod run_resume;
 mod scorecard;
 mod tripwires;
 mod watch;
@@ -122,6 +127,7 @@ fn dispatch() -> Result<i32> {
         let mut resolved = config::load();
         if let Some(name) = config::select_profile(&mut resolved.config, cli.profile.as_deref())? {
             resolved.sources.push(format!("profile {name}"));
+            resolved.selected_profile = Some(name);
         }
         Ok(resolved)
     };
@@ -157,8 +163,24 @@ fn dispatch() -> Result<i32> {
             }
         }
         Cmd::Plan { paths } => plan::plan(&resolved()?.config, &paths),
-        Cmd::Run { paths, stream } => run::run(&resolved()?.config, &paths, stream),
-        Cmd::Resume { run_id, stream } => run::resume(&resolved()?.config, &run_id, stream),
+        Cmd::Run { paths, stream } => {
+            let resolved = resolved()?;
+            run::run(
+                &resolved.config,
+                resolved.selected_profile.as_deref(),
+                &paths,
+                stream,
+            )
+        }
+        Cmd::Resume { run_id, stream } => {
+            let resolved = resolved()?;
+            run::resume(
+                &resolved.config,
+                resolved.selected_profile.as_deref(),
+                &run_id,
+                stream,
+            )
+        }
         Cmd::Watch { run_id } => watch::watch(run_id),
         Cmd::Scorecard { repo } => scorecard::scorecard(repo),
         Cmd::Status => {

@@ -42,7 +42,7 @@ pub(crate) fn profile_verify(
         ctx.events.emit(
             "order_verify",
             serde_json::json!({"id": order.id, "profile": profile, "passed": passed}),
-        );
+        )?;
         ran.insert(profile.clone());
         report.verify.push(summary);
         if !passed {
@@ -206,7 +206,7 @@ pub(crate) fn review_gate(
             "stderr_log": stderr_log.display().to_string(),
             "timeout_secs": timeout_secs,
         }),
-    );
+    )?;
     let started = Instant::now();
     let exec = executor::run_executor(&ExecRequest {
         grove: &ctx.grove,
@@ -302,7 +302,7 @@ pub(crate) fn review_gate(
             "findings": summary.findings.len(),
             "detail": summary.detail,
         }),
-    );
+    )?;
     report.review = Some(summary);
     Ok(decision)
 }

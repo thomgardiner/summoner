@@ -11,9 +11,8 @@
 # default_executor       = "mytool"
 # default_reviewer       = "othertool" # independent review gate: judges each
 #                                      # verified order (approve/reject) from a
-#                                      # fresh context; use a different vendor
-#                                      # than the implementer and configure it
-#                                      # read-only. Orders opt out with
+#                                      # fresh context; configure it read-only.
+#                                      # Orders opt out with
 #                                      # reviewer = "none".
 # max_parallel           = 2
 # default_verify_profile = "fast"
@@ -42,8 +41,8 @@
 # session_marker = "session id:" # optional: the token after this marker is the
 #                             # executor's session id, captured for revisions
 # resume_argv = ["mytool", "resume", "{session_id}", "{prompt}"]
-#                             # optional: argv for revision attempts; resumes
-#                             # the captured session so only evidence travels
+#                             # optional: argv for revisions and recovered runs;
+#                             # resumes the captured executor session
 #
 # Placeholders, substituted per argv element ({prompt} always last):
 #   {prompt}         the composed worker charter + work order
@@ -51,22 +50,20 @@
 #   {worktree}       absolute path of the order's grove worktree
 #   {git_common_dir} the repository's shared .git dir; a sandboxed executor
 #                    needs it writable to commit from a linked worktree
-#   {order_file}     absolute path of the original order file
+#   {order_file}     absolute path of the run-owned order snapshot on replay
 #
-# Orchestrator profiles: which harness invokes summoner picks the executor
-# and reviewer defaults, so no vendor judges its own work. Profiles in the
-# global config apply machine-wide; this repo file adds or overrides them.
-# Selected by --profile <name> > SUMMONER_PROFILE > a `profile = "<name>"`
-# pin (global = whole machine, repo pin overrides) > harness auto-detection
-# (CLAUDECODE -> "claude", CODEX_SANDBOX -> "codex"; applies only when the
-# named profile exists; both markers at once is ambiguous and selects
-# nothing — pin or pass a flag in nested setups).
+# Profiles select executor and reviewer defaults for an invoking environment.
+# Global profiles apply machine-wide; this repo may override named profiles.
+# Selection: --profile <name> > SUMMONER_PROFILE > a config `profile` pin.
+# Harness markers optionally select profiles named "claude" or "codex" only
+# when those profiles exist; both markers at once leave selection explicit.
 #
-# [profiles.claude]              # Claude Code orchestrates
-# default_reviewer = "mytool"    # ...so another vendor reviews
-# [profiles.codex]               # codex orchestrates
-# default_executor = "other"
-# default_reviewer = "other-review"
+# [profiles.interactive]
+# default_executor = "mytool"
+# default_reviewer = "reviewtool"
+# [profiles.automation]
+# default_executor = "batchtool"
+# default_reviewer = "audittool"
 #
 # N-version dispatch: a work order may set `variants = ["mytool", "other"]`
 # instead of `executor` to race several executors over the same order. Each

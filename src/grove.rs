@@ -11,7 +11,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// grove release with `task exec --timeout-secs` and structured finish refusals.
+/// Base CLI compatibility; preflight also feature-checks task-status schema 2.
 const REQUIRED_VERSION: (u64, u64, u64) = (0, 3, 2);
 
 pub struct GroveCli {
@@ -145,7 +145,14 @@ impl GroveCli {
             let (major, minor, patch) = REQUIRED_VERSION;
             bail!(
                 "summoner needs grove >= {major}.{minor}.{patch} \
-                 (task exec --timeout-secs and structured finish refusals); found {version:?}"
+                (task exec --timeout-secs and structured finish refusals); found {version:?}"
+            );
+        }
+        let status = self.task_status(Path::new("."))?;
+        if status["schema_version"] != 2 {
+            bail!(
+                "summoner needs Grove task status JSON schema 2 with recorded_verification; found {:?}",
+                status["schema_version"]
             );
         }
         Ok(())

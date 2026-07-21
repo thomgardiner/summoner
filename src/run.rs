@@ -1,24 +1,19 @@
-//! The fleet loop: validated orders in, one ranked report out. Every order
-//! walks the same state machine, and every arm converges on the same tail —
-//! collect evidence, terminalize the grove task, release the worktree, report.
+//! Fleet scheduling and durable report publication.
 
 use crate::config::Config;
 use crate::events::EventSink;
 use crate::grove::GroveCli;
-use crate::order::{self, Order};
+use crate::order::Order;
 use crate::report::{OrderReport, Outcome, RunReport};
-use anyhow::{Context, Result, bail};
-use std::collections::BTreeMap;
+use anyhow::{Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-
-/// One panicked worker must not poison the whole fleet: the guarded data
-/// (queue, report list) keeps its invariants per-operation, so recover the
-/// lock and keep collecting the other orders' reports.
+/// Recover a poisoned scheduler lock; its invariants are per-operation.
 fn relock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -31,130 +26,39 @@ pub(crate) struct Ctx<'a> {
     pub(crate) repo: PathBuf,
     pub(crate) run_dir: PathBuf,
     pub(crate) events: EventSink,
-    /// Tokens recorded so far across ALL workers and attempts, updated the
-    /// moment usage is scraped — the budget breaker and the revision loop
-    /// both read it, so an in-flight fleet reacts to spend, not just the
-    /// between-orders bookkeeping.
+    pub(crate) prior: &'a [OrderReport],
+    /// Live spend across all workers and attempts.
     pub(crate) spent: AtomicU64,
 }
-
-pub fn run(config: &Config, paths: &[PathBuf], stream: bool) -> Result<i32> {
+pub fn run(
+    config: &Config,
+    selected: Option<&str>,
+    paths: &[PathBuf],
+    stream: bool,
+) -> Result<i32> {
+    crate::config::selected_profile(selected);
     let grove = GroveCli::new(config.grove_bin());
     grove.preflight()?;
-    let orders = validated(paths, config)?;
-    execute(config, grove, orders, stream, Vec::new())
+    let orders = crate::run_prepare::validated(paths, config)?;
+    execute(config, grove, orders, stream, Vec::new(), Vec::new())
 }
-
-/// Re-run an earlier fleet. Orders that already reached a successful outcome
-/// are carried into the new report verbatim; everything else dispatches again
-/// on its original branch, continuing from whatever grove salvaged of the
-/// previous attempt (acquire onto an existing branch resumes it).
-pub fn resume(config: &Config, run_id: &str, stream: bool) -> Result<i32> {
-    let grove = GroveCli::new(config.grove_bin());
-    grove.preflight()?;
-
-    let report_path = runs_root().join(run_id).join("report.json");
-    let prior: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&report_path)
-            .with_context(|| format!("no report for run {run_id} at {}", report_path.display()))?,
-    )
-    .context("parsing the prior run report")?;
-    let prior_orders = prior["orders"].as_array().cloned().unwrap_or_default();
-    // Deduplicate: variant siblings all report the original order file, and
-    // loading it twice would expand duplicate sibling ids that fail validation.
-    let mut seen_files = std::collections::BTreeSet::new();
-    let files: Vec<PathBuf> = prior_orders
-        .iter()
-        .filter_map(|entry| entry["order_file"].as_str().map(PathBuf::from))
-        .filter(|path| seen_files.insert(path.clone()))
-        .collect();
-    if files.is_empty() {
-        bail!("run {run_id} names no order files to resume");
-    }
-    let orders = validated(&files, config)?;
-
-    let mut carried_outcomes = BTreeMap::new();
-    let mut prior_branches = BTreeMap::new();
-    for entry in &prior_orders {
-        let Some(id) = entry["id"].as_str() else {
-            continue;
-        };
-        if let Some(branch) = entry["branch"].as_str() {
-            prior_branches.insert(id.to_string(), branch.to_string());
-        }
-        if let Some(outcome) = entry["outcome"].as_str().and_then(Outcome::from_key)
-            && matches!(
-                outcome,
-                Outcome::Verified | Outcome::Completed | Outcome::Approved
-            )
-        {
-            carried_outcomes.insert(id.to_string(), outcome);
-        }
-    }
-    let (carried_orders, mut to_run): (Vec<Order>, Vec<Order>) = orders
-        .into_iter()
-        .partition(|order| carried_outcomes.contains_key(&order.id));
-    for order in &mut to_run {
-        // Pin the prior attempt's branch explicitly: grove reuses a branch it
-        // is told about, but derives a fresh suffixed name when the default is
-        // taken — which would silently abandon the salvaged work.
-        if order.branch.is_none()
-            && let Some(branch) = prior_branches.get(&order.id)
-        {
-            order.branch = Some(branch.clone());
-        }
-    }
-    let carried = carried_orders
-        .iter()
-        .map(|order| {
-            let mut report =
-                OrderReport::new(order, order.executor_name(config).unwrap_or_default());
-            report.outcome = carried_outcomes[&order.id];
-            report.detail = Some(format!("carried from run {run_id}"));
-            report.branch = prior_branches.get(&order.id).cloned();
-            // Carry the prior evidence that still matters: spend counts
-            // against this run's budget, attempts and the session id let the
-            // orchestrator keep working with what already happened.
-            if let Some(prior) = prior_orders
-                .iter()
-                .find(|entry| entry["id"].as_str() == Some(order.id.as_str()))
-            {
-                report.usage_tokens = prior["usage_tokens"].as_u64();
-                report.attempts = prior["attempts"].as_u64().unwrap_or(1);
-                report.session_id = prior["session_id"].as_str().map(String::from);
-                report.saved_to = prior["saved_to"].as_str().map(String::from);
-            }
-            report
-        })
-        .collect();
-    execute(config, grove, to_run, stream, carried)
+pub fn resume(config: &Config, _selected: Option<&str>, run_id: &str, stream: bool) -> Result<i32> {
+    crate::run_resume::resume(config, run_id, stream)
 }
-
-/// Load, warn, and fail-fast validate a batch before anything is dispatched.
-fn validated(paths: &[PathBuf], config: &Config) -> Result<Vec<Order>> {
-    let orders = order::load(paths)?;
-    for warning in order::warnings(&orders, config) {
-        eprintln!("summoner: warning: {warning}");
-    }
-    let problems = order::validate(&orders, config);
-    if !problems.is_empty() {
-        for problem in &problems {
-            eprintln!("summoner: {problem}");
-        }
-        bail!("{} order problem(s); nothing dispatched", problems.len());
-    }
-    preflight_env(&orders, config)?;
-    Ok(orders)
-}
-
-fn execute(
+pub(crate) fn execute(
     config: &Config,
     grove: GroveCli,
     orders: Vec<Order>,
     stream: bool,
     carried: Vec<OrderReport>,
+    prior: Vec<OrderReport>,
 ) -> Result<i32> {
-    let repo = std::env::current_dir().context("resolving current directory")?;
+    let grove_version = grove.version()?;
+    let selected_profile = crate::config::profile();
+    let repo = std::env::current_dir()
+        .context("resolving current directory")?
+        .canonicalize()
+        .context("canonicalizing repository path")?;
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -164,9 +68,24 @@ fn execute(
     std::fs::create_dir_all(&run_dir)
         .with_context(|| format!("creating run dir {}", run_dir.display()))?;
 
+    crate::run_evidence::write_manifest(
+        &run_dir,
+        &run_id,
+        &repo,
+        selected_profile.as_deref(),
+        &grove_version,
+        config,
+        &orders,
+    )?;
+    let carried_ids: BTreeSet<&str> = carried.iter().map(|report| report.id.as_str()).collect();
+    let orders: Vec<Order> = orders
+        .into_iter()
+        .filter(|order| !carried_ids.contains(order.id.as_str()))
+        .collect();
+
     install_interrupt_handler();
 
-    let events = EventSink::new(&run_dir, stream);
+    let events = EventSink::new(&run_dir, run_id.clone(), stream)?;
     let workers = config.max_parallel().min(orders.len().max(1));
     events.emit(
         "run_started",
@@ -178,35 +97,40 @@ fn execute(
             "orders": orders.iter().map(|o| o.id.clone()).collect::<Vec<_>>(),
             "carried": carried.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
         }),
-    );
+    )?;
     let ctx = Ctx {
         config,
         grove,
         repo: repo.clone(),
         run_dir: run_dir.clone(),
         events,
+        prior: &prior,
         spent: AtomicU64::new(
             carried
                 .iter()
+                .chain(&prior)
                 .filter_map(|prior| prior.usage_tokens)
                 .fold(0, u64::saturating_add),
         ),
     };
     let started = Instant::now();
     let mut scheduler = Scheduler::new(orders, config.fail_fast(), config.run_token_budget());
-    // Carried orders count as done so their dependents dispatch immediately.
+    // Carried orders count as done so their dependents dispatch immediately, and
+    // each is a durable terminal record before any worker dispatches.
     for prior in &carried {
         scheduler.complete(&prior.id, prior.outcome);
+        ctx.events.emit_terminal("order_carried", prior)?;
     }
     let scheduler = Mutex::new(scheduler);
-    let results = Mutex::new(carried);
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
                 loop {
                     let next = {
                         let mut scheduler = relock(&scheduler);
-                        if SHUTDOWN.load(Ordering::SeqCst) {
+                        // A failed journal stops dispatch: drain instead of
+                        // launching more work that could never be recorded.
+                        if SHUTDOWN.load(Ordering::SeqCst) || ctx.events.failed() {
                             scheduler.drain()
                         } else {
                             scheduler.next(ctx.spent.load(Ordering::SeqCst))
@@ -227,35 +151,29 @@ fn execute(
                             (order, report)
                         }
                     };
-                    ctx.events.emit(
-                        "order_finished",
-                        serde_json::json!({
-                            "id": report.id,
-                            "outcome": report.outcome.key(),
-                            "detail": report.detail,
-                            "usage_tokens": report.usage_tokens,
-                            "attempts": report.attempts,
-                            "session_id": report.session_id,
-                            "branch": report.branch,
-                        }),
-                    );
+                    // The terminal transition is the durable record report.json
+                    // is projected from; a journal failure here halts dispatch.
+                    if ctx.events.emit_terminal("order_finished", &report).is_err() {
+                        break;
+                    }
                     relock(&scheduler).complete(&order.id, report.outcome);
-                    relock(&results).push(report);
                 }
             });
         }
     });
 
+    // A dispatch journal failure is fatal: never rank from unrecorded memory.
+    ctx.events.check()?;
+    let orders = crate::run_journal::terminal_reports(&run_dir.join("events.jsonl"), &run_id)
+        .context("projecting order reports from the run journal")?;
     let report = RunReport::assemble(
         run_id,
         repo.display().to_string(),
         started_at,
         started.elapsed().as_secs(),
-        results.into_inner().unwrap(),
+        orders,
     );
-    let json = serde_json::to_string_pretty(&report)?;
-    std::fs::write(run_dir.join("report.json"), &json).context("writing report.json")?;
-    crate::scorecard::record(&runs_root(), &report);
+    // Fail closed: record run_finished before publishing report.json or the scorecard.
     ctx.events.emit(
         "run_finished",
         serde_json::json!({
@@ -266,7 +184,10 @@ fn execute(
             "exit_code": report.exit_code(),
             "report_path": run_dir.join("report.json").display().to_string(),
         }),
-    );
+    )?;
+    crate::run_evidence::write_once(&run_dir.join("report.json"), &report)
+        .context("writing report.json")?;
+    crate::scorecard::record(&runs_root(), &report);
     if ctx.events.streaming() {
         // Stream consumers get the complete report as the final NDJSON line;
         // the pretty print would break line-oriented parsers.
@@ -275,46 +196,12 @@ fn execute(
             serde_json::json!({"event": "report", "report": &report})
         );
     } else {
-        println!("{json}");
+        println!("{}", serde_json::to_string_pretty(&report)?);
     }
     Ok(report.exit_code())
 }
 
-/// Missing executor environment fails in seconds with the fix named, not after
-/// a full timeout inside the first order.
-fn preflight_env(orders: &[Order], config: &Config) -> Result<()> {
-    let mut missing = Vec::new();
-    let mut checked = std::collections::BTreeSet::new();
-    for order in orders {
-        let names = [order.executor_name(config), order.reviewer_name(config)];
-        for name in names.into_iter().flatten() {
-            if !checked.insert(name.clone()) {
-                continue;
-            }
-            if let Some(backend) = config.executors.get(&name) {
-                for var in &backend.env_required {
-                    if std::env::var(var).is_err() {
-                        missing.push(format!(
-                            "executor {name:?} needs ${var} (interactive-shell exports do not \
-                             reach summoner; export it here or persist it via the backend's \
-                             auth flow)"
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    if !missing.is_empty() {
-        bail!("{}", missing.join("\n"));
-    }
-    Ok(())
-}
-
-/// The dependency-aware queue. An order is ready when every `after` id reached
-/// a successful outcome; a dependency that landed anywhere else condemns its
-/// dependents to `skipped`. Cycles and unknown ids were rejected in validation,
-/// and a dependency still in `pending` is always scanned before its dependent,
-/// so `Wait` can only mean work is genuinely in flight.
+/// Dependency queue; validation already rejected cycles and unknown ids.
 struct Scheduler {
     pending: Vec<Order>,
     done: BTreeMap<String, Outcome>,

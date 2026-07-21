@@ -1,0 +1,264 @@
+//! Versioned run manifest schema and immutable replay.
+
+use crate::config::{Config, ExecutorBackend, PromptRouting};
+use crate::order::Order;
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+pub(crate) const SCHEMA_VERSION: u32 = 2;
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Manifest {
+    pub(crate) schema_version: u32,
+    pub(crate) run_id: String,
+    pub(crate) repository: String,
+    pub(crate) start_head: String,
+    pub(crate) selected_profile: Option<String>,
+    pub(crate) summoner_version: String,
+    pub(crate) grove_version: String,
+    pub(crate) settings: Settings,
+    pub(crate) orders: Vec<ManifestOrder>,
+    pub(crate) backends: BTreeMap<String, Backend>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Settings {
+    pub(crate) max_parallel: usize,
+    pub(crate) default_verify_profile: Option<String>,
+    pub(crate) order_timeout_secs: u64,
+    pub(crate) keep_failed_worktrees: bool,
+    pub(crate) fail_fast: Option<usize>,
+    pub(crate) revise: usize,
+    pub(crate) run_token_budget: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ManifestOrder {
+    pub(crate) source_path: String,
+    pub(crate) source_text: String,
+    pub(crate) expanded: ExpandedOrder,
+    pub(crate) roles: Option<Roles>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Roles {
+    pub(crate) executor: String,
+    pub(crate) reviewer: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ExpandedOrder {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) brief: String,
+    pub(crate) scope: Vec<String>,
+    pub(crate) acceptance: Vec<String>,
+    pub(crate) verify_profile: Option<String>,
+    pub(crate) executor: Option<String>,
+    pub(crate) reviewer: Option<String>,
+    pub(crate) timeout_secs: Option<u64>,
+    pub(crate) max_tokens: Option<u64>,
+    pub(crate) base: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) after: Vec<String>,
+    pub(crate) claim_group: Option<String>,
+    pub(crate) variant_of: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Backend {
+    pub(crate) argv: Vec<String>,
+    pub(crate) resume_argv: Vec<String>,
+    pub(crate) prompt: PromptRouting,
+    pub(crate) timeout_secs: Option<u64>,
+    pub(crate) usage_marker: Option<String>,
+    pub(crate) session_marker: Option<String>,
+    pub(crate) env_required: Vec<String>,
+}
+
+pub(crate) struct Replay {
+    pub(crate) config: Config,
+    pub(crate) orders: Vec<Order>,
+    pub(crate) selected_profile: Option<String>,
+}
+
+pub(crate) fn replay(dir: &Path, run_id: &str, current: &Config) -> Result<Replay> {
+    let path = dir.join("manifest.json");
+    let manifest: Manifest = serde_json::from_slice(
+        &std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+    )
+    .context("parsing immutable run manifest")?;
+    validate(&manifest, run_id)?;
+    let config = config(&manifest, current)?;
+    let orders = orders(dir, &manifest)?;
+    let orders = crate::run_prepare::checked(orders, &config)?;
+    Ok(Replay {
+        config,
+        orders,
+        selected_profile: manifest.selected_profile,
+    })
+}
+
+fn validate(manifest: &Manifest, run_id: &str) -> Result<()> {
+    if manifest.schema_version != SCHEMA_VERSION {
+        bail!(
+            "run manifest schema mismatch: need {}, found {}",
+            SCHEMA_VERSION,
+            manifest.schema_version
+        );
+    }
+    if manifest.run_id != run_id {
+        bail!(
+            "run manifest id mismatch: requested {run_id:?}, found {:?}",
+            manifest.run_id
+        );
+    }
+    let current = std::env::current_dir()
+        .context("resolving current repository")?
+        .canonicalize()
+        .context("canonicalizing current repository")?;
+    let recorded = PathBuf::from(&manifest.repository)
+        .canonicalize()
+        .context("canonicalizing the manifest repository")?;
+    if current != recorded {
+        bail!(
+            "run {run_id} belongs to {}, not {}",
+            recorded.display(),
+            current.display()
+        );
+    }
+    Ok(())
+}
+
+fn config(manifest: &Manifest, current: &Config) -> Result<Config> {
+    let mut config = Config {
+        max_parallel: Some(manifest.settings.max_parallel),
+        default_verify_profile: manifest.settings.default_verify_profile.clone(),
+        order_timeout_secs: Some(manifest.settings.order_timeout_secs),
+        grove_bin: Some(current.grove_bin()),
+        keep_failed_worktrees: Some(manifest.settings.keep_failed_worktrees),
+        fail_fast: manifest.settings.fail_fast,
+        revise: Some(manifest.settings.revise),
+        run_token_budget: manifest.settings.run_token_budget,
+        ..Config::default()
+    };
+    config.executors = manifest
+        .backends
+        .iter()
+        .map(|(name, backend)| (name.clone(), ExecutorBackend::from(backend)))
+        .collect();
+    config.freeze();
+    if config.executors.is_empty() {
+        bail!("run manifest contains no selected executor backends");
+    }
+    Ok(config)
+}
+
+fn orders(dir: &Path, manifest: &Manifest) -> Result<Vec<Order>> {
+    let root = dir.join("resume-orders");
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("creating replay order directory {}", root.display()))?;
+    manifest
+        .orders
+        .iter()
+        .map(|record| order(&root, &manifest.start_head, record))
+        .collect()
+}
+
+fn order(root: &Path, start_head: &str, record: &ManifestOrder) -> Result<Order> {
+    let roles = record.roles.as_ref().ok_or_else(|| {
+        anyhow!(
+            "run manifest order {:?} lacks resolved executor/reviewer roles; start a new run",
+            record.expanded.id
+        )
+    })?;
+    if !record.source_path.ends_with(".toml") && !record.source_path.ends_with(".json") {
+        bail!(
+            "run manifest order {:?} has unsupported source path {:?}",
+            record.expanded.id,
+            record.source_path
+        );
+    }
+    let suffix = if record.source_path.ends_with(".json") {
+        "json"
+    } else {
+        "toml"
+    };
+    let source = root.join(format!("{}.{}", record.expanded.id, suffix));
+    crate::run_evidence::write_exact(&source, record.source_text.as_bytes())?;
+    let expanded = &record.expanded;
+    Ok(Order {
+        id: expanded.id.clone(),
+        title: expanded.title.clone(),
+        brief: expanded.brief.clone(),
+        scope: expanded.scope.clone(),
+        acceptance: expanded.acceptance.clone(),
+        verify_profile: expanded.verify_profile.clone(),
+        executor: Some(roles.executor.clone()),
+        reviewer: Some(roles.reviewer.clone().unwrap_or_else(|| "none".into())),
+        timeout_secs: expanded.timeout_secs,
+        max_tokens: expanded.max_tokens,
+        base: expanded
+            .base
+            .clone()
+            .or_else(|| expanded.branch.is_none().then(|| start_head.to_string())),
+        branch: expanded.branch.clone(),
+        after: expanded.after.clone(),
+        variants: Vec::new(),
+        claim_group: expanded.claim_group.clone(),
+        variant_of: expanded.variant_of.clone(),
+        source,
+    })
+}
+
+impl From<&Order> for ExpandedOrder {
+    fn from(order: &Order) -> Self {
+        Self {
+            id: order.id.clone(),
+            title: order.title.clone(),
+            brief: order.brief.clone(),
+            scope: order.scope.clone(),
+            acceptance: order.acceptance.clone(),
+            verify_profile: order.verify_profile.clone(),
+            executor: order.executor.clone(),
+            reviewer: order.reviewer.clone(),
+            timeout_secs: order.timeout_secs,
+            max_tokens: order.max_tokens,
+            base: order.base.clone(),
+            branch: order.branch.clone(),
+            after: order.after.clone(),
+            claim_group: order.claim_group.clone(),
+            variant_of: order.variant_of.clone(),
+        }
+    }
+}
+
+impl From<&ExecutorBackend> for Backend {
+    fn from(backend: &ExecutorBackend) -> Self {
+        Self {
+            argv: backend.argv.clone(),
+            resume_argv: backend.resume_argv.clone(),
+            prompt: backend.routing(),
+            timeout_secs: backend.timeout_secs,
+            usage_marker: backend.usage_marker.clone(),
+            session_marker: backend.session_marker.clone(),
+            env_required: backend.env_required.clone(),
+        }
+    }
+}
+
+impl From<&Backend> for ExecutorBackend {
+    fn from(backend: &Backend) -> Self {
+        Self {
+            argv: backend.argv.clone(),
+            prompt: Some(backend.prompt),
+            timeout_secs: backend.timeout_secs,
+            env_required: backend.env_required.clone(),
+            usage_marker: backend.usage_marker.clone(),
+            session_marker: backend.session_marker.clone(),
+            resume_argv: backend.resume_argv.clone(),
+        }
+    }
+}

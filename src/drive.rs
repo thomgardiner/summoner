@@ -23,11 +23,12 @@ pub(crate) fn run_order(ctx: &Ctx, order: &Order) -> OrderReport {
     let executor_name = order
         .executor_name(ctx.config)
         .expect("validated before dispatch");
-    ctx.events.emit(
-        "order_started",
-        serde_json::json!({"id": order.id, "executor": executor_name}),
-    );
     let mut report = OrderReport::new(order, executor_name.clone());
+    if let Some(prior) = ctx.prior.iter().find(|prior| prior.id == order.id) {
+        report.attempts = prior.attempts.saturating_add(1);
+        report.session_id = prior.session_id.clone();
+        report.usage_tokens = prior.usage_tokens;
+    }
     let total = Instant::now();
     if let Err(error) = drive(ctx, order, &executor_name, &mut report) {
         report.outcome = Outcome::Error;
@@ -54,6 +55,10 @@ pub(crate) fn run_order(ctx: &Ctx, order: &Order) -> OrderReport {
 /// Sets `report.outcome` on every path; returns Err only for summoner-side
 /// failures that map to `error`.
 fn drive(ctx: &Ctx, order: &Order, executor_name: &str, report: &mut OrderReport) -> Result<()> {
+    ctx.events.emit(
+        "order_started",
+        serde_json::json!({"id": order.id, "executor": executor_name}),
+    )?;
     let Some(mut run) = OrderRun::begin(ctx, order, executor_name, report)? else {
         return Ok(());
     };
@@ -154,7 +159,7 @@ impl<'a> OrderRun<'a> {
                 "stderr_log": report.stderr_log,
                 "timeout_secs": timeout_secs,
             }),
-        );
+        )?;
         let base = report.base_commit.clone().unwrap_or_else(|| "HEAD".into());
         Ok(Some(OrderRun {
             ctx,
@@ -167,7 +172,7 @@ impl<'a> OrderRun<'a> {
             base,
             timeout_secs,
             task_id,
-            max_attempts: 1 + ctx.config.revise() as u64,
+            max_attempts: report.attempts + ctx.config.revise() as u64,
             feedback: String::new(),
         }))
     }
@@ -191,8 +196,9 @@ impl<'a> OrderRun<'a> {
                 "exit": exec.exit,
                 "backup_killed": exec.backup_killed,
                 "usage_tokens": report.usage_tokens,
+                "session_id": report.session_id,
             }),
-        );
+        )?;
         if let Some((outcome, reason)) = self.classify_exec(report, &exec) {
             report.outcome = outcome;
             return self.done(report, Some(reason));
@@ -332,8 +338,7 @@ impl<'a> OrderRun<'a> {
         // A revision resumes the executor's own session when the backend
         // supports it: the charter and order are already in context, so only
         // the evidence travels.
-        let resumed =
-            attempt > 1 && !self.backend.resume_argv.is_empty() && report.session_id.is_some();
+        let resumed = !self.backend.resume_argv.is_empty() && report.session_id.is_some();
         let prompt = if attempt == 1 {
             executor::compose_prompt(self.order)
         } else {
@@ -491,7 +496,7 @@ impl<'a> OrderRun<'a> {
             return Ok(false);
         };
         self.feedback = revision_feedback(report);
-        revise(self.ctx, self.order, &self.order_dir, report, reason);
+        revise(self.ctx, self.order, &self.order_dir, report, reason)?;
         Ok(true)
     }
 
@@ -512,7 +517,7 @@ impl<'a> OrderRun<'a> {
             BeginOutcome::Begun { task } => {
                 self.task_id = task.id.clone();
                 report.task_id = Some(task.id);
-                revise(self.ctx, self.order, &self.order_dir, report, reason);
+                revise(self.ctx, self.order, &self.order_dir, report, reason)?;
                 Ok(true)
             }
             BeginOutcome::Conflict { conflicts } => {
@@ -609,7 +614,13 @@ fn revision_feedback(report: &OrderReport) -> String {
 /// not report the first attempt's verdict, and a later reviewer must not see
 /// receipts from a superseded attempt. (Callers compute the revision
 /// feedback from this state BEFORE calling.)
-fn revise(ctx: &Ctx, order: &Order, order_dir: &Path, report: &mut OrderReport, reason: &str) {
+fn revise(
+    ctx: &Ctx,
+    order: &Order,
+    order_dir: &Path,
+    report: &mut OrderReport,
+    reason: &str,
+) -> Result<()> {
     report.attempts += 1;
     report.detail = None;
     report.finish = None;
@@ -629,7 +640,7 @@ fn revise(ctx: &Ctx, order: &Order, order_dir: &Path, report: &mut OrderReport, 
             "stdout_log": order_dir.join(format!("{prefix}stdout.log")).display().to_string(),
             "stderr_log": order_dir.join(format!("{prefix}stderr.log")).display().to_string(),
         }),
-    );
+    )
 }
 
 const WORKER_RESULT_WINDOW: usize = 10;

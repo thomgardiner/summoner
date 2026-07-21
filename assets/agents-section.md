@@ -31,6 +31,13 @@ lifecycle for delegated work, so prefer it over hand-driving
    `fail_fast = N` in `.summoner.toml` so a doomed fleet stops early. Never
    accept work from an executor's claim alone; the receipts are the evidence.
 
+Each run owns an immutable `manifest.json` and an authoritative, flushed
+`events.jsonl`; `report.json` is their terminal projection and may be absent
+after a hard crash. `summoner resume <run-id>` uses those run-owned inputs,
+carries only verified/approved results that agree with Grove's finished task,
+and reruns the rest on the recorded branch/session. A nonterminal Grove task
+blocks duplicate dispatch; wait for it or abandon it explicitly, then retry.
+
 Work order fields: `id`, `title`, `brief`, `scope` (paths or `crate:<name>`),
 `acceptance` (list), `verify_profile`, `executor`, `timeout_secs`, `after`.
 Chain dependent work with `after = ["<id>"]`: one run executes the whole DAG,
