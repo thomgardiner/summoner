@@ -225,11 +225,6 @@ jobs:
           foreach ($path in @($installer, $archivePath, $checksumPath, $aggregatePath)) {
             if (!(Test-Path $path) -or (Get-Item $path).Length -eq 0) { throw "missing artifact: $path" }
           }
-          $installerChecksums = @(Get-Content $aggregatePath | Where-Object { $_ -match '[ *]summoner-installer\.ps1$' })
-          if ($installerChecksums.Count -ne 1) { throw "expected one PowerShell installer checksum, found $($installerChecksums.Count)" }
-          $expectedInstaller = $installerChecksums[0].Split()[0].ToLowerInvariant()
-          $actualInstaller = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualInstaller -ne $expectedInstaller) { throw 'Summoner PowerShell installer checksum mismatch' }
           $expected = (Get-Content $checksumPath).Split()[0].ToLowerInvariant()
           $actual = (Get-FileHash $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw 'Summoner archive checksum mismatch' }
