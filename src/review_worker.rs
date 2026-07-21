@@ -32,7 +32,7 @@ pub fn run(
         .context("review worker requires a command")?;
     crate::backend_provenance::require_exact(expected_path, expected_sha256, program)
         .context("validating reviewer binary immediately before launch")?;
-    let mut child = Command::new(program);
+    let mut child = Command::new(expected_path);
     child.args(args);
     if stdin {
         child.stdin(Stdio::piped());

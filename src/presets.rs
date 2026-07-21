@@ -72,17 +72,24 @@ pub fn for_executor(name: &str, backend: &ExecutorBackend) -> Result<Option<Pres
 }
 
 pub fn on_path(binary: &str) -> bool {
+    locate(binary).is_some()
+}
+
+/// First executable PATH candidate for `binary`, honoring Windows PATHEXT
+/// variants. Spawning must use this resolved path: `Command::new` with a bare
+/// name cannot start `.cmd`/`.bat` shims (npm-installed CLIs) on Windows.
+pub fn locate(binary: &str) -> Option<std::path::PathBuf> {
     let path = Path::new(binary);
     if path.is_absolute() || binary.contains('/') || binary.contains('\\') {
         return candidates(path, cfg!(windows))
             .into_iter()
-            .any(|path| executable(&path));
+            .find(|path| executable(path));
     }
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|dir| {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).find_map(|dir| {
             candidates(&dir.join(binary), cfg!(windows))
                 .into_iter()
-                .any(|path| executable(&path))
+                .find(|path| executable(path))
         })
     })
 }
@@ -91,7 +98,8 @@ pub fn health(argv: &[String]) -> std::result::Result<(), String> {
     let Some(binary) = argv.first() else {
         return Err("empty diagnostic command".to_string());
     };
-    let mut child = Command::new(binary)
+    let program = locate(binary).map_or_else(|| Path::new(binary).to_path_buf(), |path| path);
+    let mut child = Command::new(&program)
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

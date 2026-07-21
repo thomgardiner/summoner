@@ -151,7 +151,7 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
     let prompt_path = req.run_dir.join(format!("{}prompt.md", req.file_prefix));
     std::fs::write(&prompt_path, &prompt).context("writing prompt.md")?;
 
-    let executor_argv = expand(
+    let mut executor_argv = expand(
         req.argv,
         &prompt,
         req.worktree,
@@ -168,6 +168,9 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
     .context("executor launch lacks immutable binary provenance")?;
     crate::backend_provenance::require_current(expected, &executor_argv[0], req.worktree)
         .context("validating executor binary immediately before launch")?;
+    // Spawn the exact verified binary: bare names cannot start .cmd shims on
+    // Windows, and the recorded provenance path is what the run evidence claims.
+    executor_argv[0] = expected.resolved_path.clone();
     let argv = req
         .grove
         .exec_argv(req.task_id, req.timeout_secs, &executor_argv);
