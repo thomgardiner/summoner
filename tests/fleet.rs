@@ -1,6 +1,6 @@
-//! Fleet integration against a real grove binary: fake shell executors, real
-//! worktrees, claims, receipts, and the ranked report. Runtime-skipped when a
-//! grove >= 0.3.2 is not available (point SUMMONER_TEST_GROVE at one).
+//! Fleet integration against the exact Grove release: fake shell executors,
+//! real worktrees, claims, receipts, and the ranked report. A missing or
+//! incompatible Grove is a test failure, never a successful skip.
 #![cfg(unix)]
 
 use serde_json::Value;
@@ -17,43 +17,34 @@ fn grove_bin() -> String {
     std::env::var("SUMMONER_TEST_GROVE").unwrap_or_else(|_| "grove".to_string())
 }
 
-fn grove_available() -> bool {
-    let Some(version) = Command::new(grove_bin())
+fn require_grove() {
+    let output = Command::new(grove_bin())
         .arg("--version")
         .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-    else {
-        return false;
-    };
-    let numbers: Vec<u64> = version
-        .rsplit(' ')
-        .next()
-        .unwrap_or_default()
-        .split('.')
-        .map(|part| part.parse().unwrap_or(0))
-        .chain(std::iter::repeat(0))
-        .take(3)
-        .collect();
-    if (numbers[0], numbers[1], numbers[2]) < (0, 3, 2) {
-        return false;
-    }
-    Command::new(grove_bin())
+        .expect("Grove 0.3.3 must be installed or SUMMONER_TEST_GROVE must name it");
+    assert!(
+        output.status.success(),
+        "Grove --version failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "grove 0.3.3",
+        "fleet tests require the exact qualified Grove release"
+    );
+    let output = Command::new(grove_bin())
         .args(["task", "status", "--json"])
         .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-        .is_some_and(|status| status["schema_version"] == 2)
+        .expect("run Grove task status compatibility probe");
+    assert!(output.status.success(), "Grove task status probe failed");
+    let status: Value =
+        serde_json::from_slice(&output.stdout).expect("Grove task status must be valid JSON");
+    assert_eq!(status["schema_version"], 2, "wrong Grove task schema");
 }
 
 macro_rules! require_grove {
     () => {
-        if !grove_available() {
-            eprintln!("skipping: grove >= 0.3.2 not on PATH (set SUMMONER_TEST_GROVE)");
-            return;
-        }
+        require_grove();
     };
 }
 
@@ -162,9 +153,7 @@ impl Fixture {
     /// A "judge" reviewer backend plus `default_reviewer` pointing at it.
     /// Must run after `executor()`, which rewrites the config file whole.
     fn reviewer(&self, body: &str) {
-        let script = self.base.path().join("judge-executor.sh");
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = self.reviewer_script(body);
         let existing = std::fs::read_to_string(self.repo.join(".summoner.toml")).unwrap();
         std::fs::write(
             self.repo.join(".summoner.toml"),
@@ -176,6 +165,28 @@ impl Fixture {
         )
         .unwrap();
         self.commit_all("reviewer fixture");
+    }
+
+    fn reviewer_script(&self, body: &str) -> PathBuf {
+        let script = self.base.path().join("judge-executor.sh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+prompt=$(cat)
+field() {{ printf '%s' "$prompt" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | tail -1; }}
+legacy=$({body})
+verdict=$(printf '%s' "$legacy" | sed -n 's/.*"verdict":"\([^"]*\)".*/\1/p')
+findings=${{legacy#*\"findings\":}}
+findings=${{findings%\}}}}
+printf '{{"protocol_version":1,"review_nonce":"%s","candidate_snapshot_sha256":"%s","diff_sha256":"%s","verdict":"%s","findings":%s,"reviewer":{{"provider":"judge","model":"fake"}}}}\n' \
+  "$(field review_nonce)" "$(field candidate_snapshot_sha256)" "$(field diff_sha256)" "$verdict" "$findings"
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
     }
 
     fn order(&self, name: &str, body: &str) -> PathBuf {
@@ -199,14 +210,15 @@ impl Fixture {
     }
 
     fn summoner_command(&self, args: &[&str], grove: &str) -> Command {
+        let base = std::fs::canonicalize(self.base.path()).unwrap();
         let mut command = Command::new(SUMMONER);
         command
             .args(args)
             .current_dir(&self.repo)
             .env("SUMMONER_GROVE_BIN", grove)
-            .env("GROVE_CACHE_ROOT", self.base.path().join("cache"))
-            .env("XDG_CONFIG_HOME", self.base.path().join("config"))
-            .env("XDG_CACHE_HOME", self.base.path().join("xdg"));
+            .env("GROVE_CACHE_ROOT", base.join("cache"))
+            .env("XDG_CONFIG_HOME", base.join("config"))
+            .env("XDG_CACHE_HOME", base.join("xdg"));
         // Hermetic against the harness running THIS test suite: profile
         // auto-detection must see only what each test opts into.
         for marker in [
@@ -221,10 +233,11 @@ impl Fixture {
     }
 
     fn grove(&self, args: &[&str]) -> Output {
+        let base = std::fs::canonicalize(self.base.path()).unwrap();
         Command::new(grove_bin())
             .args(args)
             .current_dir(&self.repo)
-            .env("GROVE_CACHE_ROOT", self.base.path().join("cache"))
+            .env("GROVE_CACHE_ROOT", base.join("cache"))
             .output()
             .expect("run grove")
     }
@@ -475,6 +488,12 @@ fn approving_reviewer_upgrades_verified_to_approved_and_exit_zero() {
     assert_eq!(entry["outcome"], "approved", "{report}");
     assert_eq!(entry["review"]["reviewer"], "judge", "{report}");
     assert_eq!(entry["review"]["verdict"], "approve", "{report}");
+    let snapshot = entry["review"]["candidate_snapshot_sha256"]
+        .as_str()
+        .expect("report carries the reviewed snapshot digest");
+    assert_eq!(snapshot.len(), 64, "{report}");
+    assert!(entry["review"].get("candidate_source_sha256").is_none());
+    assert!(entry["review"].get("candidate_tree").is_none());
     assert_eq!(entry["finish"]["verified"], true, "{report}");
     assert_eq!(report["summary"]["approved"], 1, "{report}");
     // The review prompt is on disk next to the executor's: independent record.
@@ -506,6 +525,23 @@ fn approving_reviewer_upgrades_verified_to_approved_and_exit_zero() {
     let verdict_at = events.find("\"order_review\"").expect("order_review");
     assert!(started_at < verdict_at, "{events}");
     assert!(events.contains("review-stdout.log"), "{events}");
+    let review_events = events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            matches!(
+                event["event"].as_str(),
+                Some("review_started" | "order_review")
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(review_events.len(), 2, "{events}");
+    for event in review_events {
+        assert_eq!(event["candidate_snapshot_sha256"], snapshot, "{event}");
+        assert_eq!(event["diff_sha256"], entry["review"]["diff_sha256"]);
+        assert!(event.get("source_sha256").is_none(), "{event}");
+        assert!(event.get("candidate_tree").is_none(), "{event}");
+    }
     assert_eq!(
         fixture.task_states(),
         [("smn-wave".into(), "finished".into())]
@@ -522,13 +558,7 @@ fn orchestrator_profile_switches_the_reviewer_on_by_harness_marker() {
     );
     // The judge exists but is wired only through the claude profile: which
     // orchestrator invokes summoner decides whether the gate is on.
-    let script = fixture.base.path().join("judge-executor.sh");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\necho '{\"verdict\":\"approve\",\"findings\":[]}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = fixture.reviewer_script("echo '{\"verdict\":\"approve\",\"findings\":[]}'");
     let existing = std::fs::read_to_string(fixture.repo.join(".summoner.toml")).unwrap();
     std::fs::write(
         fixture.repo.join(".summoner.toml"),
@@ -718,7 +748,7 @@ fn rejecting_reviewer_downgrades_verified_work_and_carries_findings() {
 }
 
 #[test]
-fn a_reviewer_that_writes_voids_its_verdict_and_the_writes_are_undone() {
+fn a_reviewer_that_mutates_its_capsule_voids_the_verdict_and_source_stays_exact() {
     require_grove!();
     let fixture = Fixture::new(true);
     fixture.executor(
@@ -728,7 +758,8 @@ fn a_reviewer_that_writes_voids_its_verdict_and_the_writes_are_undone() {
     // The worst reviewer: plants an untracked file AND stages a malicious
     // edit to an in-scope file before approving its own tampering.
     fixture.reviewer(
-        "echo sneaky > planted.txt\n\
+        "chmod u+w . src src/lib.rs\n\
+         echo sneaky > planted.txt\n\
          echo 'pub fn sneak() {}' >> src/lib.rs\ngit add src/lib.rs\n\
          echo '{\"verdict\":\"approve\",\"findings\":[]}'",
     );
@@ -741,7 +772,7 @@ fn a_reviewer_that_writes_voids_its_verdict_and_the_writes_are_undone() {
         entry["review"]["detail"]
             .as_str()
             .unwrap()
-            .contains("modified the worktree"),
+            .contains("did not authorize"),
         "{report}"
     );
     // Neither write reaches the branch; the executor's work does.

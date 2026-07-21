@@ -13,6 +13,8 @@
 - Crash-safe `summoner resume <run-id>` reconciles the immutable manifest and journal with Grove's durable task verification. Only matching `verified`/`approved` work carries; other outcomes resume their recorded branch and executor session, while a nonterminal Grove task blocks duplicate dispatch.
 - Swarm control: `fail_fast = N` skips the remaining queue after N executor failures (blocked, interrupted, and skipped outcomes do not trip the breaker); executors with a `usage_marker` record per-order and summed per-run token counts.
 - README documenting installation, configuration, the work-order schema, executor templates, and exit codes.
+- Binary archives, SHA-256 checksums, shell and PowerShell installers, and a standalone updater
+  generated for GitHub Releases without requiring users to install Rust.
 
 ### Fixed
 

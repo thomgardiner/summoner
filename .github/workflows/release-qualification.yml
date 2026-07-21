@@ -1,0 +1,347 @@
+name: Release qualification
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-set:
+    runs-on: ubuntu-22.04
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Qualify exact cargo-dist release file set
+        run: node .github/workflows/patch-release-condition.mjs --release-files artifacts qualified-release-files
+      - name: Preserve only qualified release files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qualified-release-files
+          path: qualified-release-files/*
+          if-no-files-found: error
+
+  macos-installer:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify and install macOS release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="summoner-${{ matrix.target }}.tar.xz"
+          for path in artifacts/summoner-installer.sh artifacts/sha256.sum "artifacts/${archive}" "artifacts/${archive}.sha256"; do
+            test -s "${path}"
+          done
+          (cd artifacts && shasum -a 256 -c sha256.sum)
+          (cd artifacts && shasum -a 256 -c "${archive}.sha256")
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory artifacts >"${RUNNER_TEMP}/summoner-http.log" 2>&1 &
+          server=$!
+          trap 'kill "${server}"' EXIT
+          for _ in {1..20}; do
+            curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null && break
+            sleep 0.25
+          done
+          curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null
+          install_root="${RUNNER_TEMP}/summoner release/bin"
+          SUMMONER_DOWNLOAD_URL="http://127.0.0.1:8765/${archive}" \
+          CARGO_DIST_FORCE_INSTALL_DIR="${install_root}" \
+          SUMMONER_NO_MODIFY_PATH=1 \
+            sh artifacts/summoner-installer.sh
+          expected=$(jq -er '[.releases[] | select(.app_name == "summoner") | .app_version] | if length == 1 then .[0] else error("expected one Summoner release") end' <<<"${PLAN}")
+          test "$("${install_root}/summoner" --version)" = "summoner ${expected}"
+
+  shell-installer:
+    runs-on: ubuntu-22.04
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify and install release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=summoner-x86_64-unknown-linux-musl.tar.xz
+          test -s artifacts/summoner-installer.sh
+          test -s artifacts/sha256.sum
+          test -s "artifacts/${archive}"
+          test -s "artifacts/${archive}.sha256"
+          (cd artifacts && shasum -a 256 -c sha256.sum)
+          (cd artifacts && shasum -a 256 -c "${archive}.sha256")
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory artifacts >"${RUNNER_TEMP}/summoner-http.log" 2>&1 &
+          server=$!
+          trap 'kill "${server}"' EXIT
+          for _ in {1..20}; do
+            curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null && break
+            sleep 0.25
+          done
+          curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null
+          install_root="${RUNNER_TEMP}/summoner release/bin"
+          SUMMONER_DOWNLOAD_URL="http://127.0.0.1:8765/${archive}" \
+          CARGO_DIST_FORCE_INSTALL_DIR="${install_root}" \
+          SUMMONER_NO_MODIFY_PATH=1 \
+            sh artifacts/summoner-installer.sh
+          expected=$(jq -er '[.releases[] | select(.app_name == "summoner") | .app_version] | if length == 1 then .[0] else error("expected one Summoner release") end' <<<"${PLAN}")
+          test "$("${install_root}/summoner" --version)" = "summoner ${expected}"
+          echo "SUMMONER_BIN=${install_root}/summoner" >> "${GITHUB_ENV}"
+      - name: Install exact Grove 0.3.3
+        shell: bash
+        env:
+          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.3
+        run: |
+          set -euo pipefail
+          archive=grove-x86_64-unknown-linux-musl.tar.xz
+          curl --proto '=https' --tlsv1.2 -fLsS -O "${GROVE_RELEASE}/${archive}"
+          curl --proto '=https' --tlsv1.2 -fLsS -O "${GROVE_RELEASE}/${archive}.sha256"
+          shasum -a 256 -c "${archive}.sha256"
+          mkdir -p "${RUNNER_TEMP}/grove/bin"
+          tar -xJf "${archive}" -C "${RUNNER_TEMP}/grove/bin"
+          test "$("${RUNNER_TEMP}/grove/bin/grove" --version)" = "grove 0.3.3"
+          echo "${RUNNER_TEMP}/grove/bin" >> "${GITHUB_PATH}"
+      - name: Run installed reviewed fleet smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke="${RUNNER_TEMP}/summoner fleet ü"
+          mkdir -p "${smoke}/fake-bin"
+          cat >"${smoke}/fake-bin/codex" <<'EOF'
+          #!/bin/sh
+          set -eu
+          if [ "${1:-}" = login ]; then exit 0; fi
+          prompt=$(mktemp)
+          trap 'rm -f "$prompt"' EXIT
+          cat >"$prompt"
+          if [ -f docs/summoner-demo.md ]; then
+            python3 - "$prompt" <<'PY'
+          import json
+          import sys
+
+          templates = []
+          for line in open(sys.argv[1], encoding="utf-8"):
+              try:
+                  value = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if value.get("protocol_version") == 1:
+                  templates.append(value)
+          if len(templates) != 1:
+              raise SystemExit(f"expected one review protocol template, found {len(templates)}")
+          verdict = templates[0]
+          verdict["verdict"] = "approve"
+          verdict["findings"] = []
+          verdict["reviewer"]["model"] = "fake"
+          print(json.dumps(verdict, separators=(",", ":")))
+          PY
+            exit 0
+          fi
+          mkdir -p docs
+          printf '%s\n' '# Summoner demo' '' 'This repository builds the Summoner fleet runner.' > docs/summoner-demo.md
+          git add docs/summoner-demo.md
+          git commit -qm 'demo executor'
+          printf '%s\n' '{"summoner_status":"complete","unmet":[]}'
+          EOF
+          chmod +x "${smoke}/fake-bin/codex"
+          cd "${smoke}"
+          git init -q
+          git config user.name release-smoke
+          git config user.email release-smoke@example.com
+          printf '%s\n' '[verification]' 'required = ["fast"]' '[verification.profiles.fast]' 'commands = [{ argv = ["git", "diff", "--check"] }]' > .grove.toml
+          export XDG_CONFIG_HOME="${smoke}/config"
+          export PATH="${smoke}/fake-bin:${RUNNER_TEMP}/grove/bin:${PATH}"
+          "${SUMMONER_BIN}" init --preset codex --example
+          git add -A
+          git commit -qm 'initialize smoke repository'
+          "${SUMMONER_BIN}" doctor orders/example.toml
+          "${SUMMONER_BIN}" plan orders/example.toml
+          "${SUMMONER_BIN}" run --stream orders/example.toml > events.jsonl
+          jq -s -e '
+            (map(.event) | index("run_started") != null and index("order_started") != null) and
+            (last.event == "report") and
+            (last.report.summary.approved == 1) and
+            (last.report.summary.error == 0) and
+            (last.report.summary.rejected == 0)
+          ' events.jsonl
+
+  powershell-installer:
+    runs-on: windows-2022
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify and install release artifacts
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $archive = 'summoner-x86_64-pc-windows-msvc.zip'
+          $installer = Join-Path $PWD 'artifacts/summoner-installer.ps1'
+          $archivePath = Join-Path $PWD "artifacts/$archive"
+          $checksumPath = "$archivePath.sha256"
+          $aggregatePath = Join-Path $PWD 'artifacts/sha256.sum'
+          foreach ($path in @($installer, $archivePath, $checksumPath, $aggregatePath)) {
+            if (!(Test-Path $path) -or (Get-Item $path).Length -eq 0) { throw "missing artifact: $path" }
+          }
+          $installerChecksums = @(Get-Content $aggregatePath | Where-Object { $_ -match '[ *]summoner-installer\.ps1$' })
+          if ($installerChecksums.Count -ne 1) { throw "expected one PowerShell installer checksum, found $($installerChecksums.Count)" }
+          $expectedInstaller = $installerChecksums[0].Split()[0].ToLowerInvariant()
+          $actualInstaller = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualInstaller -ne $expectedInstaller) { throw 'Summoner PowerShell installer checksum mismatch' }
+          $expected = (Get-Content $checksumPath).Split()[0].ToLowerInvariant()
+          $actual = (Get-FileHash $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'Summoner archive checksum mismatch' }
+          $server = Start-Process python -ArgumentList '-m','http.server','8765','--bind','127.0.0.1','--directory','artifacts' -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              try {
+                Invoke-WebRequest 'http://127.0.0.1:8765/summoner-installer.ps1' -Method Head | Out-Null
+                $ready = $true
+                break
+              } catch { Start-Sleep -Milliseconds 250 }
+            }
+            if (!$ready) { throw 'artifact server did not become ready' }
+            $installRoot = Join-Path $env:RUNNER_TEMP 'summoner release/bin'
+            $env:SUMMONER_DOWNLOAD_URL = "http://127.0.0.1:8765/$archive"
+            $env:CARGO_DIST_FORCE_INSTALL_DIR = $installRoot
+            $env:SUMMONER_NO_MODIFY_PATH = '1'
+            & $installer
+            $summoner = Join-Path $installRoot 'summoner.exe'
+            $releases = @((ConvertFrom-Json $env:PLAN).releases | Where-Object app_name -eq 'summoner')
+            if ($releases.Count -ne 1) { throw "expected one Summoner release, found $($releases.Count)" }
+            $version = & $summoner --version
+            if ($version -ne "summoner $($releases[0].app_version)") { throw "unexpected version: $version" }
+            "SUMMONER_BIN=$summoner" | Out-File $env:GITHUB_ENV -Append
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+      - name: Install exact Grove 0.3.3
+        shell: pwsh
+        env:
+          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.3
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $archive = 'grove-x86_64-pc-windows-msvc.zip'
+          Invoke-WebRequest "$env:GROVE_RELEASE/$archive" -OutFile $archive
+          Invoke-WebRequest "$env:GROVE_RELEASE/$archive.sha256" -OutFile "$archive.sha256"
+          $expected = (Get-Content "$archive.sha256").Split()[0].ToLowerInvariant()
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'Grove archive checksum mismatch' }
+          $bin = Join-Path $env:RUNNER_TEMP 'grove/bin'
+          Expand-Archive $archive -DestinationPath $bin
+          $version = & (Join-Path $bin 'grove.exe') --version
+          if ($version -ne 'grove 0.3.3') { throw "unexpected Grove version: $version" }
+          $bin | Out-File $env:GITHUB_PATH -Append
+          "GROVE_BIN=$(Join-Path $bin 'grove.exe')" | Out-File $env:GITHUB_ENV -Append
+      - name: Run installed reviewed fleet smoke
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $smoke = Join-Path $env:RUNNER_TEMP 'summoner fleet ü'
+          $fake = Join-Path $smoke 'fake-bin'
+          New-Item -ItemType Directory -Force $fake | Out-Null
+          @'
+          @echo off
+          if "%1"=="login" exit /b 0
+          more > "%TEMP%\summoner-codex-prompt.txt"
+          if exist docs\summoner-demo.md (
+            powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0review.ps1" "%TEMP%\summoner-codex-prompt.txt"
+            exit /b 0
+          )
+          if not exist docs mkdir docs
+          echo # Summoner demo>docs\summoner-demo.md
+          echo.>>docs\summoner-demo.md
+          echo This repository builds the Summoner fleet runner.>>docs\summoner-demo.md
+          git add docs\summoner-demo.md
+          git commit -qm "demo executor"
+          echo {"summoner_status":"complete","unmet":[]}
+          '@ | Set-Content (Join-Path $fake 'codex.cmd')
+          @'
+          $templates = foreach ($line in Get-Content $args[0]) {
+            try {
+              $value = $line | ConvertFrom-Json -ErrorAction Stop
+              if ($value.protocol_version -eq 1) { $value }
+            } catch {}
+          }
+          if (@($templates).Count -ne 1) { throw "expected one review protocol template, found $(@($templates).Count)" }
+          $verdict = @($templates)[0]
+          $verdict.verdict = 'approve'
+          $verdict.findings = @()
+          $verdict.reviewer.model = 'fake'
+          $verdict | ConvertTo-Json -Compress -Depth 5
+          '@ | Set-Content (Join-Path $fake 'review.ps1')
+          New-Item -ItemType Directory -Force $smoke | Out-Null
+          Set-Location $smoke
+          git init -q
+          git config user.name release-smoke
+          git config user.email release-smoke@example.com
+          @'
+          [verification]
+          required = ["fast"]
+          [verification.profiles.fast]
+          commands = [{ argv = ["git", "diff", "--check"] }]
+          '@ | Set-Content .grove.toml
+          $env:APPDATA = Join-Path $smoke 'config'
+          $env:PATH = "$fake;$(Split-Path $env:GROVE_BIN);$env:PATH"
+          & $env:SUMMONER_BIN init --preset codex --example
+          git add -A
+          git commit -qm 'initialize smoke repository'
+          & $env:SUMMONER_BIN doctor orders/example.toml
+          & $env:SUMMONER_BIN plan orders/example.toml
+          & $env:SUMMONER_BIN run --stream orders/example.toml | Out-File events.jsonl -Encoding utf8
+          $events = @(Get-Content events.jsonl | ForEach-Object { $_ | ConvertFrom-Json })
+          if ('run_started' -notin $events.event -or 'order_started' -notin $events.event) {
+            throw "reviewed fleet smoke did not stream lifecycle events: $(Get-Content events.jsonl -Raw)"
+          }
+          if ($events[-1].event -ne 'report') { throw 'reviewed fleet smoke did not end with report event' }
+          $report = $events[-1].report
+          if ($report.summary.approved -ne 1 -or $report.summary.error -ne 0 -or $report.summary.rejected -ne 0) {
+            throw "reviewed fleet smoke failed: $(Get-Content events.jsonl -Raw)"
+          }

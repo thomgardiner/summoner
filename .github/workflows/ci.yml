@@ -5,21 +5,162 @@ on:
     branches: [main, master]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  test:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-deny@0.20.2
+          fallback: none
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo deny check advisories
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: nextest@0.9.140
+          fallback: none
+      - run: cargo nextest run --locked --no-tests fail --bins --test setup
+
+  fleet:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
         with:
-          components: clippy, rustfmt
-      - uses: taiki-e/install-action@nextest
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      # Fleet integration tests need grove >= 0.3.2 on PATH and skip
-      # themselves otherwise; install grove from git once 0.3.2 lands.
-      - run: cargo nextest run
+          tool: nextest@0.9.140
+          fallback: none
+      - name: Install exact Grove 0.3.3 artifact (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.3
+        run: |
+          set -euo pipefail
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) target=x86_64-unknown-linux-musl ;;
+            Darwin-arm64) target=aarch64-apple-darwin ;;
+            Darwin-x86_64) target=x86_64-apple-darwin ;;
+            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          archive="grove-${target}.tar.xz"
+          curl --proto '=https' --tlsv1.2 -fLsS -O "${GROVE_RELEASE}/${archive}"
+          curl --proto '=https' --tlsv1.2 -fLsS -O "${GROVE_RELEASE}/${archive}.sha256"
+          shasum -a 256 -c "${archive}.sha256"
+          mkdir -p "${RUNNER_TEMP}/grove/bin"
+          tar -xJf "${archive}" -C "${RUNNER_TEMP}/grove/bin"
+          echo "${RUNNER_TEMP}/grove/bin" >> "${GITHUB_PATH}"
+          echo "SUMMONER_TEST_GROVE=${RUNNER_TEMP}/grove/bin/grove" >> "${GITHUB_ENV}"
+      - name: Install exact Grove 0.3.3 artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.3
+        run: |
+          $archive = "grove-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest "$env:GROVE_RELEASE/$archive" -OutFile $archive
+          Invoke-WebRequest "$env:GROVE_RELEASE/$archive.sha256" -OutFile "$archive.sha256"
+          $expected = (Get-Content "$archive.sha256").Split()[0].ToLowerInvariant()
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Grove archive checksum mismatch" }
+          $bin = Join-Path $env:RUNNER_TEMP "grove/bin"
+          Expand-Archive $archive -DestinationPath $bin
+          $bin | Out-File $env:GITHUB_PATH -Append
+          "SUMMONER_TEST_GROVE=$(Join-Path $bin 'grove.exe')" | Out-File $env:GITHUB_ENV -Append
+      - name: Prove exact Grove release (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          test "$("$SUMMONER_TEST_GROVE" --version)" = "grove 0.3.3"
+          "$SUMMONER_TEST_GROVE" capabilities > grove-capabilities.json
+          node -e '
+            const c = require("./grove-capabilities.json");
+            if (
+              c.schema_version !== 1 || c.grove_version !== "0.3.3" ||
+              c.status.repository_schema !== 1 || c.status.task_status_schema !== 2 || c.status.task_record_schema !== 4 ||
+              c.inspection.binding_schema !== 1 || c.inspection.execution_schema !== 1 ||
+              c.inspection.process_tree !== "unix_process_group_best_effort" ||
+              c.inspection.filesystem !== "read_only_permissions_and_digest" ||
+              c.inspection.output !== "captured_logs_json_report"
+            ) process.exit(1);
+          '
+      - name: Prove exact Grove release (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = & $env:SUMMONER_TEST_GROVE --version
+          if ($version -ne "grove 0.3.3") { throw "unexpected Grove version: $version" }
+          $c = & $env:SUMMONER_TEST_GROVE capabilities | ConvertFrom-Json
+          if (
+            $c.schema_version -ne 1 -or $c.grove_version -ne '0.3.3' -or
+            $c.status.repository_schema -ne 1 -or $c.status.task_status_schema -ne 2 -or $c.status.task_record_schema -ne 4 -or
+            $c.inspection.binding_schema -ne 1 -or $c.inspection.execution_schema -ne 1 -or
+            $c.inspection.process_tree -ne 'windows_job_object' -or
+            $c.inspection.filesystem -ne 'read_only_permissions_and_digest' -or
+            $c.inspection.output -ne 'captured_logs_json_report'
+          ) { throw "unexpected Grove capabilities: $($c | ConvertTo-Json -Compress -Depth 4)" }
+      - name: Run portable full lifecycle
+        run: cargo nextest run --locked --no-tests fail --test fleet_lifecycle
+      - name: Run complete Unix fleet suite
+        if: runner.os != 'Windows'
+        run: cargo nextest run --locked --no-tests fail --test fleet
+
+  distribution:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install dist 0.32.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer="${RUNNER_TEMP}/cargo-dist-installer.sh"
+          curl --proto '=https' --tlsv1.2 -fLsS \
+            https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh \
+            -o "${installer}"
+          echo "b657cf8c04a8b7bc28f39d220f7e6dd11bbd2bdb072c552262bd9ccf597261b5  ${installer}" | shasum -a 256 -c -
+          sh "${installer}"
+      - name: Check generated release workflow and qualification gate
+        run: |
+          node .github/workflows/patch-release-condition.mjs
+          dist plan
+          git diff --exit-code -- dist-workspace.toml .github/workflows/release.yml
+
+  source-install:
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install from the source tree
+        run: cargo install --path . --locked --root "${{ runner.temp }}/summoner-install"
+      - name: Smoke installed binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: 'test "$("${{ runner.temp }}/summoner-install/bin/summoner" --version)" = "summoner 0.1.0"'
+      - name: Smoke installed binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = & "${{ runner.temp }}/summoner-install/bin/summoner.exe" --version
+          if ($version -ne "summoner 0.1.0") { throw "unexpected version: $version" }

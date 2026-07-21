@@ -11,8 +11,12 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Base CLI compatibility; preflight also feature-checks task-status schema 2.
-const REQUIRED_VERSION: (u64, u64, u64) = (0, 3, 2);
+#[path = "grove_compat.rs"]
+mod compat;
+#[path = "grove_inspection.rs"]
+mod inspection;
+pub use compat::Capabilities;
+pub use inspection::InspectionExec;
 
 pub struct GroveCli {
     bin: String,
@@ -104,7 +108,7 @@ impl GroveCli {
     /// A domain call: JSON on stdout with exit 0 or 1. Any other exit is an
     /// error even if stdout parses — a grove that printed JSON and then died
     /// (or exited 2) did not deliver a domain outcome.
-    fn domain(&self, cwd: &Path, args: &[&str]) -> Result<serde_json::Value> {
+    pub(super) fn domain(&self, cwd: &Path, args: &[&str]) -> Result<serde_json::Value> {
         let out = self.call(cwd, args)?;
         if matches!(out.code, 0 | 1)
             && let Ok(value) = serde_json::from_str(out.stdout.trim())
@@ -127,35 +131,8 @@ impl GroveCli {
         Ok(out.stdout.trim().to_string())
     }
 
-    pub fn preflight(&self) -> Result<()> {
-        let version = self
-            .version()
-            .with_context(|| format!("grove binary {:?} not usable", self.bin))?;
-        let numbers = version
-            .rsplit(' ')
-            .next()
-            .unwrap_or_default()
-            .split('.')
-            .map(|part| part.parse::<u64>().unwrap_or(0))
-            .chain(std::iter::repeat(0))
-            .take(3)
-            .collect::<Vec<_>>();
-        let found = (numbers[0], numbers[1], numbers[2]);
-        if found < REQUIRED_VERSION {
-            let (major, minor, patch) = REQUIRED_VERSION;
-            bail!(
-                "summoner needs grove >= {major}.{minor}.{patch} \
-                (task exec --timeout-secs and structured finish refusals); found {version:?}"
-            );
-        }
-        let status = self.task_status(Path::new("."))?;
-        if status["schema_version"] != 2 {
-            bail!(
-                "summoner needs Grove task status JSON schema 2 with recorded_verification; found {:?}",
-                status["schema_version"]
-            );
-        }
-        Ok(())
+    pub fn preflight(&self) -> Result<Capabilities> {
+        compat::check(self)
     }
 
     /// `worktree acquire` prints one bare path on stdout, not JSON.
@@ -404,25 +381,5 @@ mod tests {
                 "exec"
             ]
         );
-    }
-
-    #[test]
-    fn version_gate_rejects_old_groves() {
-        let parse = |v: &str| {
-            let numbers = v
-                .rsplit(' ')
-                .next()
-                .unwrap_or_default()
-                .split('.')
-                .map(|part| part.parse::<u64>().unwrap_or(0))
-                .chain(std::iter::repeat(0))
-                .take(3)
-                .collect::<Vec<_>>();
-            (numbers[0], numbers[1], numbers[2])
-        };
-        assert!(parse("grove 0.3.1") < REQUIRED_VERSION);
-        assert!(parse("grove 0.3.2") >= REQUIRED_VERSION);
-        assert!(parse("grove 0.4.0") >= REQUIRED_VERSION);
-        assert!(parse("grove 1.0.0") >= REQUIRED_VERSION);
     }
 }

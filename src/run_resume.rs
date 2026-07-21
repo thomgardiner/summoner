@@ -9,13 +9,18 @@ use std::path::{Path, PathBuf};
 
 /// Re-run an earlier fleet from its immutable manifest and authoritative
 /// journal. Grove remains the source of truth for task lifecycle and receipts.
-pub fn resume(current: &Config, run_id: &str, stream: bool) -> Result<i32> {
+pub fn resume(
+    current: &Config,
+    run_id: &str,
+    stream: bool,
+    allow_unknown_auth: bool,
+) -> Result<i32> {
     let run_dir = crate::run::runs_root().join(run_id);
     let replay = crate::run_manifest::replay(&run_dir, run_id, current)?;
     let config = replay.config;
     crate::config::selected_profile(replay.selected_profile.as_deref());
     let grove = GroveCli::new(config.grove_bin());
-    grove.preflight()?;
+    crate::doctor::require(&config, &replay.orders, allow_unknown_auth)?;
 
     let records = crate::run_journal::records(&run_dir.join("events.jsonl"), run_id)?;
     let mut history = histories(records)?;

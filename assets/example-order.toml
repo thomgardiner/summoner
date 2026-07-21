@@ -1,0 +1,12 @@
+id = "summoner-demo"
+title = "Add a Summoner demo note"
+brief = """
+Create docs/summoner-demo.md with a short heading and one paragraph explaining
+what this repository builds. Do not modify any other file. Commit the result.
+"""
+scope = ["docs/summoner-demo.md"]
+acceptance = [
+  "docs/summoner-demo.md is concise and accurate",
+  "the change is committed",
+]
+timeout_secs = 600

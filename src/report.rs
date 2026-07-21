@@ -3,6 +3,7 @@
 
 use crate::grove::{TaskVerification, VerifySummary};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -183,6 +184,9 @@ pub struct OrderReport {
     pub stdout_tail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr_tail: Option<String>,
+    /// Structured evidence when the order failed inside a scheduler worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_failure: Option<WorkerFailure>,
     pub timing: Timing,
 }
 
@@ -218,7 +222,44 @@ impl OrderReport {
             stderr_log: None,
             stdout_tail: None,
             stderr_tail: None,
+            worker_failure: None,
             timing: Timing::default(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerFailureKind {
+    Panic,
+    SchedulerPoisoned,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct WorkerFailure {
+    pub kind: WorkerFailureKind,
+    pub message: String,
+}
+
+impl WorkerFailure {
+    pub(crate) fn panic(payload: Box<dyn Any + Send>) -> Self {
+        let message = match payload.downcast::<String>() {
+            Ok(message) => *message,
+            Err(payload) => match payload.downcast::<&'static str>() {
+                Ok(message) => (*message).to_string(),
+                Err(_) => "non-string panic payload".to_string(),
+            },
+        };
+        Self {
+            kind: WorkerFailureKind::Panic,
+            message,
+        }
+    }
+
+    pub(crate) fn poisoned() -> Self {
+        Self {
+            kind: WorkerFailureKind::SchedulerPoisoned,
+            message: "scheduler lock was poisoned by a worker panic".to_string(),
         }
     }
 }
@@ -242,6 +283,12 @@ pub struct ReviewSummary {
     pub stdout_log: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr_log: Option<String>,
+    pub protocol_version: u32,
+    pub review_nonce: String,
+    pub candidate_snapshot_sha256: String,
+    pub diff_sha256: String,
+    pub raw_stdout_sha256: String,
+    pub capsule_id: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]

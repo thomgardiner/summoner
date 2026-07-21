@@ -1,42 +1,51 @@
 # Summoner
 
-Summoner is a model-neutral fleet runner for coding-agent CLIs. The invoking harness acts as the orchestrator: it writes work orders, and Summoner deterministically dispatches configured executors in grove-managed worktrees and returns one ranked JSON report.
+Summoner is a Rust-aware fleet runner for coding-agent CLIs. Codex, Claude Code, and Kimi can already edit code in worktrees; Summoner and Grove add the repository control plane around them: Cargo-aware scope planning, isolated warm build lanes, repository-owned verification receipts, and an independent reviewer bound to the exact candidate digest. The invoking harness writes work orders, Summoner dispatches any configured model CLI, and the result is one ranked evidence report instead of a pile of agent transcripts.
 
 ## Install
 
-From this repository:
+Summoner requires Grove. For published current releases, install both binaries:
 
 ```sh
-cargo install --path .
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/grove/releases/download/v0.3.3/grove-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.sh | sh
 ```
 
-Summoner also requires a `grove` binary with task-status JSON schema 2 and at least one configured executor CLI. `summoner doctor` checks this before any fleet dispatch.
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/grove/releases/download/v0.3.3/grove-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.ps1 | iex"
+```
+
+Before the first release is published, build from a checkout with `cargo install --locked --path .`. Summoner requires the exact release-qualified Grove 0.3.3, Git, a Rust repository with real Grove verification profiles, and one installed/authenticated model CLI:
+
+- [Codex install](https://github.com/openai/codex#installing-and-running-codex-cli) and [authentication](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt)
+- [Claude Code install](https://code.claude.com/docs/en/installation) and [authentication](https://code.claude.com/docs/en/authentication)
+- [Kimi Code install and login](https://www.kimi.com/code/docs/en/)
+
+## Five-minute setup
+
+Choose explicitly; Summoner never guesses a model and never stores credentials:
+
+```sh
+summoner init --preset codex --example  # or claude / kimi
+summoner doctor orders/example.toml
+summoner plan orders/example.toml
+summoner run --stream orders/example.toml
+```
+
+The final command prints lifecycle NDJSON as each Rust-aware order is claimed, built in its own Grove lane, verified, and reviewed. While it runs, open another terminal in the repository and run `summoner watch` for the live fleet board.
+
+The first command installs the explicitly selected writable worker and separately named read-only/plan reviewer, initializes the repository contract, and writes the example order. It prints the exact `doctor`, `plan`, and `run` commands to use next. Existing global comments and unrelated settings survive; same-named custom executors are never overwritten. Codex and Claude auth checks are noninteractive and bounded to five seconds. Kimi currently exposes a config check but no reliable noninteractive auth-status check. Choosing the Kimi preset explicitly persists that acknowledgement for its two generated roles; custom unknown-auth backends fail closed until their exact names are listed in `allow_unknown_auth` in the personal global config, or a single invocation uses `--allow-unknown-auth`. Repository config cannot grant this acknowledgement.
+
+`doctor`, `run`, and `resume` share the same preflight: the exact Grove 0.3.3 machine-capability contract (task schemas, inspection schemas, process-tree supervision, read-only digest sealing, and captured logs), Git repository and author identity, verification-profile existence, executable/environment checks, and bounded model lifecycle diagnostics. An unreadable or malformed existing config is an error, never an ignored fallback.
+
+The older `summoner init --global --preset <name>` and `summoner init --example` forms remain available. If `.grove.toml` has one unambiguous verification profile, the example pins it. Otherwise the order deliberately omits `verify_profile`; `doctor` explains that a successful run will be `completed`, not `verified`, until you select a real repository profile. It never invents a false-green gate.
+
+Normal `summoner init` remains idempotent: it creates `.summoner.toml`, appends the managed `AGENTS.md` contract, and installs `.claude/skills/summoner/SKILL.md` without replacing user-owned content. `summoner config` shows the resolved settings and sources.
 
 ## Usage
 
-### 1. Initialize a repository
-
-Run this at the repository root:
-
-```sh
-summoner init
-```
-
-This creates `.summoner.toml`, adds the orchestration contract to `AGENTS.md`, and installs the Claude skill at `.claude/skills/summoner/SKILL.md`. Existing files are skipped or appended to rather than replaced. Inspect the resolved configuration and its source files with:
-
-```sh
-summoner config
-```
-
-### 2. Check the environment
-
-```sh
-summoner doctor
-```
-
-The JSON result checks the grove binary, the default executor, each configured executor binary, and required environment variables.
-
-### 3. Write a work order
+### Write a work order
 
 Put one independent task in each TOML or JSON file. For example, `orders/readme.toml`:
 
@@ -59,15 +68,15 @@ summoner check orders/
 
 Before dispatching a batch, analyze it: `summoner plan orders/` resolves every scope exactly as dispatch will and reports claim conflicts, package couplings from the workspace dependency graph, and suggested execution waves (`grove plan --topology` prints the package map to decompose against in the first place). Package couplings are advisory because file-disjoint orders run in isolated worktrees and build lanes. An overlapping scope requires an `after` edge; an overlap already ordered by the declared DAG is clean. Exit 0 means the batch is dispatchable as written.
 
-### 4. Run the fleet
+### Run the fleet
 
 ```sh
-summoner run orders/
+summoner run --stream orders/
 ```
 
-Summoner validates all orders before dispatch, runs up to the configured concurrency, and prints the report as JSON.
+Summoner validates all orders before dispatch, runs up to the configured concurrency, and streams lifecycle NDJSON ending in a `report` event. Use `summoner run orders/` when a plain final JSON report is more convenient than live events.
 
-### 5. Read the report
+### Read the report
 
 The same JSON is saved as `report.json` under `$XDG_CACHE_HOME/summoner/runs/<run-id>/`, or under the equivalent home-cache or temporary directory fallback. Every run also appends lifecycle events (`run_started`, `order_started`, `order_dispatched`, `order_exec_done`, `order_verify`, `review_started`, `order_review`, `order_checkpoint`, `order_finished`, `run_finished`) to `events.jsonl` in that directory; `summoner run --stream` mirrors them to stdout as NDJSON, ending with a single `report` event carrying the complete ranked report, so any consumer — an orchestrating session, an IDE, `tail -f` — can watch a fleet live. The `order_dispatched` event names the grove task, worktree, and log paths to follow, and `review_started` names the reviewer's logs so the gate is tailable the moment it spawns.
 
@@ -89,9 +98,24 @@ Budgets are enforced two ways. `run_token_budget = N` (or `SUMMONER_RUN_TOKEN_BU
 
 Fleet control: `fail_fast = N` in `.summoner.toml` skips the remaining queue after N orders fail. An executor with a `usage_marker` gets its token count recorded per order and summed per run. Orders are ranked worst-first, with ties sorted by ID. Review non-green outcomes, log tails, diffs, conflicts, and verification receipts before accepting executor work. `summoner status` prints Summoner-owned grove tasks as JSON.
 
+### Human handoff
+
+Summoner deliberately does not merge agent branches. Take the `branch` and Grove task id from the final report, then inspect the candidate and its durable receipt before deciding whether to land it:
+
+```sh
+git log --oneline <base>..grove/smn-<order-id>
+git diff --stat <base>...grove/smn-<order-id>
+git diff --check <base>...grove/smn-<order-id>
+grove task status --json <task-id>
+```
+
+The task status must show the terminal task state and its recorded verification. Review the full diff and report findings; only then use your repository's normal merge or cherry-pick process. The branch is the work handoff, the Grove receipt is the verification handoff, and neither substitutes for human acceptance.
+
 ## Review gate
 
-Set `default_reviewer = "<executor name>"` (or per-order `reviewer`; `reviewer = "none"` opts an order out) and every order that verifies is judged by an independently configured reviewer before it counts as green. The reviewer is any configured executor, spawned fresh in the order's worktree under the same grove supervision, prompted with the review charter, the order's brief and acceptance criteria, and the live diff since base (staged and unstaged included, untracked files listed) — deliberately never the implementing executor's transcript. Summoner warns when implementation and review select the same backend. The reviewer's last output line must be `{"verdict":"approve"|"reject","findings":[...]}`. Approve upgrades `verified` to `approved`; reject lands the order as `rejected` with the findings in the report. A reviewer that modifies the worktree has its writes undone and its verdict voided (`review_failed`). Configure reviewer CLIs read-only; the gate enforces that boundary again after execution.
+Set `default_reviewer = "<executor name>"` (or per-order `reviewer`; `reviewer = "none"` opts an order out) and every order that verifies is judged by an independently configured reviewer before it counts as green. Grove captures the still-live task into a standalone leased inspection capsule with no origin, shared Git metadata, or write-capable build lane; the reviewer runs only there under its configured native read-only/plan sandbox. The prompt contains the charter, requirements, verification evidence, live candidate diff, a random nonce, and exact snapshot/diff SHA-256 digests—never the implementing executor's transcript. The reviewer must return one strict protocol-v1 JSON object with those exact bindings; unknown fields, injected prose, stale/replayed bindings, oversized findings, process-tree leaks, source changes, or capsule changes void approval. Raw logs and their hashes remain in the run evidence. Approve upgrades `verified` to `approved`; reject lands as `rejected` with typed findings.
+
+The capsule is defense in depth, not a universal same-user OS sandbox: Grove 0.3.3 enforces read-only permissions plus before/after digests and uses a Windows Job Object or a best-effort Unix process group. A same-user process may be able to change permissions elsewhere on the host, so retain each vendor CLI's native sandbox and do not grant reviewer argv `{git_common_dir}`. File-routed reviewer prompts are rejected because the prompt lives outside the sealed capsule; shipped presets use argument or stdin routing.
 
 ## Orchestrator profiles
 
@@ -109,7 +133,7 @@ default_reviewer = "audit"
 
 A profile only overrides `default_executor` and `default_reviewer`; executors stay shared. Inheritance is layered and field-level: global config is the base, `[profiles.<name>]` overlays it, and repository config overrides only the fields it names. An explicit empty string clears an inherited marker. Selection, highest first: `--profile <name>`, `SUMMONER_PROFILE`, then a `profile = "<name>"` config pin. As opt-in conveniences, harness markers select profiles named `claude` or `codex` only when those profiles exist; if both markers are present, selection is left explicit. Naming an absent profile is an error. `summoner config` lists the applied profile in `sources`.
 
-Anti-reward-hacking runs before the reviewer does: summoner scans the diff deterministically and reports `tripwires` per order — deleted test files, added skip markers (`#[ignore]`, `.skip(`), net assertion loss, Cargo `[profile]` edits. Touching verification config itself (`.grove.toml`, `.summoner.toml`, `rust-toolchain*`, `.cargo/config*`) is a hard stop: the receipts a modified config produces are untrustworthy, so the order lands `unverified` and its task is abandoned, whatever the tests said.
+Before review, Summoner scans the diff and reports deterministic `tripwires` per order — deleted test files, added skip markers (`#[ignore]`, `.skip(`), net assertion loss, Cargo `[profile]` edits. These are anomaly indicators that raise review scrutiny; they cannot prove that tests remain semantically strong or prevent reward hacking. Touching verification config itself (`.grove.toml`, `.summoner.toml`, `rust-toolchain*`, `.cargo/config*`) is a separate hard stop: the receipts a modified config produces are untrustworthy, so the order lands `unverified` and its task is abandoned, whatever the tests said.
 
 ## Work-order fields
 
@@ -131,7 +155,7 @@ Anti-reward-hacking runs before the reviewer does: summoner scans the diff deter
 
 ## Executor configuration
 
-Executors are argv templates; Summoner contains no vendor-specific dispatch logic and ships no presets — which agent CLIs you run, under which flags and accounts, is personal configuration. Define executors once in `~/.config/summoner/config.toml` (`summoner init --global` drops an annotated template there); a repo's `.summoner.toml` overrides same-named executors. An example:
+Executors remain argv templates; the dispatch engine contains no vendor branches. Versioned Codex, Claude, and Kimi recipes live in one embedded data catalog and are installed only after an explicit `summoner init --global --preset <name>`. Custom executors belong in the platform-native personal config (XDG on Unix, `%APPDATA%\summoner\config.toml` on Windows); a repo's `.summoner.toml` overrides same-named executors. An example:
 
 ```toml
 default_executor = "agent"

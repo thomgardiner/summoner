@@ -142,6 +142,7 @@ fn config(manifest: &Manifest, current: &Config) -> Result<Config> {
         fail_fast: manifest.settings.fail_fast,
         revise: Some(manifest.settings.revise),
         run_token_budget: manifest.settings.run_token_budget,
+        allow_unknown_auth: current.allow_unknown_auth.clone(),
         ..Config::default()
     };
     config.executors = manifest

@@ -11,7 +11,7 @@ use crate::order::Order;
 use crate::outcome::{
     finalize, git, head_and_tail, kill_recorded_group, number_after, release, token_after,
 };
-use crate::report::{OrderReport, Outcome};
+use crate::report::{OrderReport, Outcome, WorkerFailure};
 use crate::run::{Ctx, SHUTDOWN};
 use crate::tripwires;
 use anyhow::Result;
@@ -30,26 +30,47 @@ pub(crate) fn run_order(ctx: &Ctx, order: &Order) -> OrderReport {
         report.usage_tokens = prior.usage_tokens;
     }
     let total = Instant::now();
-    if let Err(error) = drive(ctx, order, &executor_name, &mut report) {
-        report.outcome = Outcome::Error;
-        report.detail = Some(format!("{error:#}"));
-        let task_id = report.task_id.clone();
-        let worktree = report.worktree.clone();
-        match (task_id, worktree) {
-            (Some(task_id), Some(worktree)) => finalize(
-                ctx,
-                order,
-                &task_id,
-                std::path::Path::new(&worktree),
-                &mut report,
-                Some("summoner: internal error"),
-            ),
-            (None, Some(worktree)) => release(ctx, std::path::Path::new(&worktree), &mut report),
-            _ => {}
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drive(ctx, order, &executor_name, &mut report)
+    })) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => fail(ctx, order, &mut report, format!("{error:#}"), None),
+        Err(payload) => {
+            let failure = WorkerFailure::panic(payload);
+            let detail = format!("worker panicked: {}", failure.message);
+            fail(ctx, order, &mut report, detail, Some(failure));
         }
     }
     report.timing.total_secs = total.elapsed().as_secs();
     report
+}
+
+fn fail(
+    ctx: &Ctx<'_>,
+    order: &Order,
+    report: &mut OrderReport,
+    detail: String,
+    failure: Option<WorkerFailure>,
+) {
+    report.outcome = Outcome::Error;
+    report.detail = Some(detail);
+    report.worker_failure = failure;
+    let abandon = report
+        .worker_failure
+        .as_ref()
+        .map_or("summoner: internal error", |_| "summoner: worker panicked");
+    match (report.task_id.clone(), report.worktree.clone()) {
+        (Some(task_id), Some(worktree)) => finalize(
+            ctx,
+            order,
+            &task_id,
+            Path::new(&worktree),
+            report,
+            Some(abandon),
+        ),
+        (None, Some(worktree)) => release(ctx, Path::new(&worktree), report),
+        _ => {}
+    }
 }
 
 /// Sets `report.outcome` on every path; returns Err only for summoner-side

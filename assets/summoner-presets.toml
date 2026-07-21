@@ -1,0 +1,73 @@
+schema_version = 1
+
+[[presets]]
+name = "codex"
+reviewer_name = "codex-review"
+health_argv = ["codex", "login", "status"]
+health_label = "authentication"
+auth_checked = true
+setup_hint = "run `codex login`, then rerun `summoner doctor`"
+
+[presets.backend]
+argv = [
+  "codex", "--ask-for-approval", "never", "exec",
+  "--cd", "{worktree}", "--add-dir", "{git_common_dir}",
+  "--sandbox", "workspace-write",
+]
+prompt = "stdin"
+timeout_secs = 900
+usage_marker = "tokens used"
+
+[presets.reviewer]
+argv = [
+  "codex", "--ask-for-approval", "never", "exec",
+  "--cd", "{worktree}", "--sandbox", "read-only",
+]
+prompt = "stdin"
+timeout_secs = 600
+
+[[presets]]
+name = "claude"
+reviewer_name = "claude-review"
+health_argv = ["claude", "auth", "status", "--json"]
+health_label = "authentication"
+auth_checked = true
+setup_hint = "run `claude auth login`, then rerun `summoner doctor`"
+
+[presets.backend]
+argv = [
+  "claude", "--print", "--permission-mode", "auto",
+  "--add-dir", "{git_common_dir}",
+]
+prompt = "stdin"
+timeout_secs = 900
+
+[presets.reviewer]
+argv = [
+  "claude", "--print", "--permission-mode", "plan",
+]
+prompt = "stdin"
+timeout_secs = 600
+
+[[presets]]
+name = "kimi"
+reviewer_name = "kimi-review"
+health_argv = ["kimi", "doctor"]
+health_label = "configuration (authentication is not checked)"
+auth_checked = false
+setup_hint = "run `kimi login` before the first fleet, then rerun `summoner doctor`"
+
+[presets.backend]
+argv = [
+  "kimi", "--auto", "--add-dir", "{git_common_dir}",
+  "--prompt", "{prompt}",
+]
+prompt = "arg"
+timeout_secs = 900
+
+[presets.reviewer]
+argv = [
+  "kimi", "--plan", "--prompt", "{prompt}",
+]
+prompt = "arg"
+timeout_secs = 600

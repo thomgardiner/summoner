@@ -28,9 +28,10 @@ run the orders themselves in a scratch repository, not this one.
 ## Run
 
 ```sh
-summoner run examples/orders/
+summoner run --stream examples/orders/
 ```
 
 Summoner dispatches `add-endpoint` first, waits for it to verify, then runs
-`document-endpoint` from the finished branch, and prints one ranked JSON
-report.
+`document-endpoint` from the finished branch, and streams lifecycle NDJSON
+ending in one ranked report event. Run `summoner watch` in a second terminal
+for the live fleet board.

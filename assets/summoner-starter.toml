@@ -1,12 +1,11 @@
 # Summoner configuration. `summoner config` prints the resolved values and
 # where they came from. Precedence: SUMMONER_* env > repo .summoner.toml
-# (found by ancestor walk) > ~/.config/summoner/config.toml > defaults.
+# (found by ancestor walk) > the platform-native personal config > defaults.
 #
-# Summoner ships NO executors: which agent CLIs you run, under which flags
-# and accounts, is personal. Define executors once in your global config
-# (`summoner init --global` drops this same template there) and keep this
-# repo file for repo policy; a repo-defined executor overrides a global one
-# with the same name.
+# This repo starter selects no model. Install one of Summoner's versioned,
+# credential-free global recipes with `summoner init --global --preset codex`
+# (or `claude` / `kimi`), or define a custom executor in personal config.
+# Keep this file for repo policy; same-named repo executors override globals.
 
 # default_executor       = "mytool"
 # default_reviewer       = "othertool" # independent review gate: judges each

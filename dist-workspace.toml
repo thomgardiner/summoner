@@ -1,0 +1,29 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.32.0"
+ci = ["github"]
+pr-run-mode = "upload"
+host-jobs = ["./release-qualification"]
+cache-builds = false
+github-release = "announce"
+allow-dirty = ["ci"] # dist 0.32 cannot fail-close announce on custom host jobs.
+hosting = ["github"]
+packages = ["summoner"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-musl",
+  "x86_64-pc-windows-msvc",
+]
+installers = ["shell", "powershell"]
+install-updater = true
+checksum = "sha256"
+github-attestations = true
+
+[dist.github-action-commits]
+"actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+"actions/attest" = "f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6"

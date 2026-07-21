@@ -4,21 +4,19 @@ use crate::config::Config;
 use crate::events::EventSink;
 use crate::grove::GroveCli;
 use crate::order::Order;
-use crate::report::{OrderReport, Outcome, RunReport};
+use crate::report::{OrderReport, RunReport};
 use anyhow::{Context, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(any(unix, windows))]
+use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+mod worker;
 
 pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-/// Recover a poisoned scheduler lock; its invariants are per-operation.
-fn relock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 pub(crate) struct Ctx<'a> {
     pub(crate) config: &'a Config,
@@ -35,15 +33,22 @@ pub fn run(
     selected: Option<&str>,
     paths: &[PathBuf],
     stream: bool,
+    allow_unknown_auth: bool,
 ) -> Result<i32> {
     crate::config::selected_profile(selected);
     let grove = GroveCli::new(config.grove_bin());
-    grove.preflight()?;
     let orders = crate::run_prepare::validated(paths, config)?;
+    crate::doctor::require(config, &orders, allow_unknown_auth)?;
     execute(config, grove, orders, stream, Vec::new(), Vec::new())
 }
-pub fn resume(config: &Config, _selected: Option<&str>, run_id: &str, stream: bool) -> Result<i32> {
-    crate::run_resume::resume(config, run_id, stream)
+pub fn resume(
+    config: &Config,
+    _selected: Option<&str>,
+    run_id: &str,
+    stream: bool,
+    allow_unknown_auth: bool,
+) -> Result<i32> {
+    crate::run_resume::resume(config, run_id, stream, allow_unknown_auth)
 }
 pub(crate) fn execute(
     config: &Config,
@@ -83,7 +88,7 @@ pub(crate) fn execute(
         .filter(|order| !carried_ids.contains(order.id.as_str()))
         .collect();
 
-    install_interrupt_handler();
+    install_interrupt_handler()?;
 
     let events = EventSink::new(&run_dir, run_id.clone(), stream)?;
     let workers = config.max_parallel().min(orders.len().max(1));
@@ -114,53 +119,14 @@ pub(crate) fn execute(
         ),
     };
     let started = Instant::now();
-    let mut scheduler = Scheduler::new(orders, config.fail_fast(), config.run_token_budget());
+    let mut fleet = worker::Fleet::new(orders, config.fail_fast(), config.run_token_budget());
     // Carried orders count as done so their dependents dispatch immediately, and
     // each is a durable terminal record before any worker dispatches.
     for prior in &carried {
-        scheduler.complete(&prior.id, prior.outcome);
+        fleet.carry(&prior.id, prior.outcome);
         ctx.events.emit_terminal("order_carried", prior)?;
     }
-    let scheduler = Mutex::new(scheduler);
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let next = {
-                        let mut scheduler = relock(&scheduler);
-                        // A failed journal stops dispatch: drain instead of
-                        // launching more work that could never be recorded.
-                        if SHUTDOWN.load(Ordering::SeqCst) || ctx.events.failed() {
-                            scheduler.drain()
-                        } else {
-                            scheduler.next(ctx.spent.load(Ordering::SeqCst))
-                        }
-                    };
-                    let (order, report) = match next {
-                        Next::Done => break,
-                        Next::Wait => {
-                            std::thread::sleep(Duration::from_millis(100));
-                            continue;
-                        }
-                        Next::Skip(order, reason) => {
-                            let report = skipped(&order, ctx.config, reason);
-                            (order, report)
-                        }
-                        Next::Run(order) => {
-                            let report = crate::drive::run_order(&ctx, &order);
-                            (order, report)
-                        }
-                    };
-                    // The terminal transition is the durable record report.json
-                    // is projected from; a journal failure here halts dispatch.
-                    if ctx.events.emit_terminal("order_finished", &report).is_err() {
-                        break;
-                    }
-                    relock(&scheduler).complete(&order.id, report.outcome);
-                }
-            });
-        }
-    });
+    fleet.run(&ctx, workers)?;
 
     // A dispatch journal failure is fatal: never rank from unrecorded memory.
     ctx.events.check()?;
@@ -201,157 +167,101 @@ pub(crate) fn execute(
     Ok(report.exit_code())
 }
 
-/// Dependency queue; validation already rejected cycles and unknown ids.
-struct Scheduler {
-    pending: Vec<Order>,
-    done: BTreeMap<String, Outcome>,
-    /// Circuit breaker: after this many failures, the rest of the queue is
-    /// skipped instead of spending executor budget on a doomed fleet.
-    fail_fast: Option<usize>,
-    failures: usize,
-    /// Token ceiling for the whole run; once live spend crosses it, the rest
-    /// of the queue is skipped (and the revision loop stops revising).
-    budget: Option<u64>,
-}
-
-enum Next {
-    Run(Box<Order>),
-    Skip(Box<Order>, String),
-    Wait,
-    Done,
-}
-
-impl Scheduler {
-    fn new(orders: Vec<Order>, fail_fast: Option<usize>, budget: Option<u64>) -> Self {
-        Scheduler {
-            pending: orders,
-            done: BTreeMap::new(),
-            fail_fast,
-            failures: 0,
-            budget,
-        }
-    }
-
-    fn next(&mut self, spent: u64) -> Next {
-        if self.pending.is_empty() {
-            return Next::Done;
-        }
-        if let Some(budget) = self.budget
-            && spent >= budget
-        {
-            let order = self.pending.remove(0);
-            return Next::Skip(
-                Box::new(order),
-                format!(
-                    "not started: run token budget exhausted ({spent} of {budget} tokens spent)"
-                ),
-            );
-        }
-        if let Some(limit) = self.fail_fast
-            && self.failures >= limit
-        {
-            let order = self.pending.remove(0);
-            return Next::Skip(
-                Box::new(order),
-                format!(
-                    "not started: fail_fast tripped after {} failure(s)",
-                    self.failures
-                ),
-            );
-        }
-        for index in 0..self.pending.len() {
-            let mut in_flight = false;
-            let mut condemned = None;
-            for dep in &self.pending[index].after {
-                match self.done.get(dep) {
-                    Some(Outcome::Verified | Outcome::Completed | Outcome::Approved) => {}
-                    Some(outcome) => {
-                        condemned = Some(format!("dependency {dep:?} was {}", outcome.key()));
-                        break;
-                    }
-                    None => {
-                        in_flight = true;
-                        break;
-                    }
-                }
-            }
-            if let Some(reason) = condemned {
-                return Next::Skip(Box::new(self.pending.remove(index)), reason);
-            }
-            if !in_flight {
-                return Next::Run(Box::new(self.pending.remove(index)));
-            }
-        }
-        Next::Wait
-    }
-
-    fn drain(&mut self) -> Next {
-        match self.pending.pop() {
-            Some(order) => Next::Skip(Box::new(order), "not started: run interrupted".into()),
-            None => Next::Done,
-        }
-    }
-
-    fn complete(&mut self, id: &str, outcome: Outcome) {
-        // Coordination artifacts (blocked) and operator actions (interrupted,
-        // skipped) are not executor failures; they must not trip the breaker.
-        if matches!(
-            outcome,
-            Outcome::Error
-                | Outcome::Stalled
-                | Outcome::ExecutorFailed
-                | Outcome::ScopeViolation
-                | Outcome::Unverified
-                | Outcome::ReviewFailed
-                | Outcome::Rejected
-        ) {
-            self.failures += 1;
-        }
-        self.done.insert(id.to_string(), outcome);
-    }
-}
-
-fn skipped(order: &Order, config: &Config, reason: String) -> OrderReport {
-    let executor = order.executor_name(config).unwrap_or_default();
-    let mut report = OrderReport::new(order, executor);
-    report.outcome = Outcome::Skipped;
-    report.detail = Some(reason);
-    report
-}
-
 pub(crate) fn runs_root() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("summoner")
-        .join("runs")
+    runs_root_for(
+        cfg!(windows),
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("LOCALAPPDATA"),
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        std::env::temp_dir(),
+    )
+}
+
+fn runs_root_for(
+    windows: bool,
+    xdg: Option<OsString>,
+    local_app_data: Option<OsString>,
+    home: Option<OsString>,
+    user_profile: Option<OsString>,
+    temp: PathBuf,
+) -> PathBuf {
+    let present = |value: Option<OsString>| value.filter(|value| !value.is_empty());
+    let root = if windows {
+        present(local_app_data).map(PathBuf::from).or_else(|| {
+            present(user_profile)
+                .or_else(|| present(home))
+                .map(PathBuf::from)
+                .map(|path| path.join(".cache"))
+        })
+    } else {
+        present(xdg).map(PathBuf::from).or_else(|| {
+            present(home)
+                .or_else(|| present(user_profile))
+                .map(PathBuf::from)
+                .map(|path| path.join(".cache"))
+        })
+    };
+    root.unwrap_or(temp).join("summoner").join("runs")
 }
 
 #[cfg(unix)]
-fn install_interrupt_handler() {
+fn install_interrupt_handler() -> Result<()> {
     extern "C" fn note_interrupt(_: libc::c_int) {
         SHUTDOWN.store(true, Ordering::SeqCst);
     }
     unsafe {
-        libc::signal(
+        if libc::signal(
             libc::SIGINT,
             note_interrupt as *const () as libc::sighandler_t,
-        );
-        libc::signal(
+        ) == libc::SIG_ERR
+        {
+            return Err(std::io::Error::last_os_error()).context("installing SIGINT handler");
+        }
+        if libc::signal(
             libc::SIGTERM,
             note_interrupt as *const () as libc::sighandler_t,
-        );
+        ) == libc::SIG_ERR
+        {
+            return Err(std::io::Error::last_os_error()).context("installing SIGTERM handler");
+        }
     }
+    Ok(())
 }
 
-#[cfg(not(unix))]
-fn install_interrupt_handler() {}
+#[cfg(windows)]
+fn install_interrupt_handler() -> Result<()> {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler,
+    };
+
+    unsafe extern "system" fn note_interrupt(event: u32) -> i32 {
+        if event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT {
+            SHUTDOWN.store(true, Ordering::SeqCst);
+            1
+        } else {
+            0
+        }
+    }
+
+    if unsafe { SetConsoleCtrlHandler(Some(note_interrupt), 1) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("installing Windows console interrupt handler");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn install_interrupt_handler() -> Result<()> {
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::{Outcome, WorkerFailureKind};
+    use std::collections::BTreeMap;
+    use std::path::Path;
 
     fn order(id: &str) -> Order {
         Order {
@@ -361,7 +271,7 @@ mod tests {
             scope: vec!["src".into()],
             acceptance: Vec::new(),
             verify_profile: None,
-            executor: None,
+            executor: Some("fake".into()),
             reviewer: None,
             timeout_secs: None,
             max_tokens: None,
@@ -375,23 +285,130 @@ mod tests {
         }
     }
 
-    #[test]
-    fn budget_breaker_skips_the_queue_once_spent_crosses_the_ceiling() {
-        let mut scheduler = Scheduler::new(vec![order("a"), order("b")], None, Some(100));
-        let Next::Run(first) = scheduler.next(0) else {
-            panic!("first order dispatches under budget");
-        };
-        scheduler.complete(&first.id, Outcome::Verified);
-        // Live spend is what the breaker reads, not completion bookkeeping.
-        match scheduler.next(150) {
-            Next::Skip(second, reason) => {
-                assert_eq!(second.id, "b");
-                assert!(
-                    reason.contains("budget exhausted (150 of 100 tokens spent)"),
-                    "{reason}"
-                );
-            }
-            _ => panic!("over-budget queue must drain as skipped"),
+    fn context<'a>(config: &'a Config, dir: &Path, prior: &'a [OrderReport]) -> Ctx<'a> {
+        Ctx {
+            config,
+            grove: GroveCli::new("grove".into()),
+            repo: dir.into(),
+            run_dir: dir.into(),
+            events: EventSink::new(dir, "run".into(), false).unwrap(),
+            prior,
+            spent: AtomicU64::new(0),
         }
+    }
+
+    fn reports(dir: &Path) -> BTreeMap<String, OrderReport> {
+        crate::run_journal::terminal_reports(&dir.join("events.jsonl"), "run")
+            .unwrap()
+            .into_iter()
+            .map(|report| (report.id.clone(), report))
+            .collect()
+    }
+
+    #[test]
+    fn windows_run_evidence_prefers_durable_user_storage() {
+        let temp = PathBuf::from("temporary");
+        assert_eq!(
+            runs_root_for(
+                true,
+                Some("xdg".into()),
+                Some("local".into()),
+                Some("home".into()),
+                Some("profile".into()),
+                temp.clone(),
+            ),
+            PathBuf::from("local/summoner/runs")
+        );
+        assert_eq!(
+            runs_root_for(
+                true,
+                None,
+                None,
+                Some("home".into()),
+                Some("profile".into()),
+                temp,
+            ),
+            PathBuf::from("profile/.cache/summoner/runs")
+        );
+    }
+
+    #[test]
+    fn unix_run_evidence_honors_xdg_then_home() {
+        assert_eq!(
+            runs_root_for(
+                false,
+                Some("xdg".into()),
+                Some("local".into()),
+                Some("home".into()),
+                None,
+                PathBuf::from("temporary"),
+            ),
+            PathBuf::from("xdg/summoner/runs")
+        );
+    }
+
+    #[test]
+    fn panicked_order_does_not_escape_or_stop_unrelated_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let mut dependent = order("dependent");
+        dependent.after.push("panics".into());
+        let fleet = worker::Fleet::new(
+            vec![order("panics"), order("independent"), dependent],
+            None,
+            None,
+        );
+        fleet
+            .dispatch(&context(&config, dir.path(), &[]), 2, |_, order| {
+                if order.id == "panics" {
+                    panic!("deterministic worker panic");
+                }
+                let mut report = OrderReport::new(order, "fake".into());
+                report.outcome = Outcome::Verified;
+                report
+            })
+            .unwrap();
+        let reports = reports(dir.path());
+        let panicked = reports.get("panics").unwrap();
+        assert_eq!(panicked.outcome, Outcome::Error);
+        let failure = panicked.worker_failure.as_ref().unwrap();
+        assert_eq!(failure.kind, WorkerFailureKind::Panic);
+        assert_eq!(failure.message, "deterministic worker panic");
+        assert_eq!(
+            reports.get("independent").unwrap().outcome,
+            Outcome::Verified
+        );
+        let dependent = reports.get("dependent").unwrap();
+        assert_eq!(dependent.outcome, Outcome::Skipped);
+        assert!(
+            dependent
+                .detail
+                .as_deref()
+                .is_some_and(|detail| { detail.contains("dependency \"panics\" was error") })
+        );
+    }
+
+    #[test]
+    fn poisoned_scheduler_becomes_structured_order_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let fleet = worker::Fleet::new(vec![order("poisoned"), order("independent")], None, None);
+        fleet.poison();
+        fleet
+            .dispatch(&context(&config, dir.path(), &[]), 2, |_, order| {
+                let mut report = OrderReport::new(order, "fake".into());
+                report.outcome = Outcome::Verified;
+                report
+            })
+            .unwrap();
+        let reports = reports(dir.path());
+        let poisoned = reports.get("poisoned").unwrap();
+        assert_eq!(poisoned.outcome, Outcome::Error);
+        let failure = poisoned.worker_failure.as_ref().unwrap();
+        assert_eq!(failure.kind, WorkerFailureKind::SchedulerPoisoned);
+        assert_eq!(
+            reports.get("independent").unwrap().outcome,
+            Outcome::Verified
+        );
     }
 }

@@ -1,6 +1,6 @@
 [verification]
 # Verified = the full suite passed against the task's exact checkout.
-# Fleet tests need task-status JSON schema 2; they runtime-skip without it.
+# Fleet qualification hard-fails unless the exact supported Grove is available.
 required = ["fast"]
 
 [verification.profiles.fast]

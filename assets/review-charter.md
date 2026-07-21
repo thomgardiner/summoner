@@ -27,11 +27,7 @@ Rules:
   reject for style or for out-of-scope improvements the order never asked
   for.
 
-Verdict: the LAST line of your output must be exactly one JSON object,
-nothing after it:
-
-{"verdict":"approve","findings":[{"severity":"minor","file":"src/x.rs","line":10,"summary":"..."}]}
-
-- `verdict` is "approve" or "reject".
-- Reject when any blocker-severity finding exists or an acceptance
-  criterion is unmet. Approving with minor findings is fine; list them.
+Verdict: return exactly the versioned JSON object and immutable bindings given
+at the end of the review prompt, with no prose or fencing before or after it.
+Unknown fields and stale or mismatched bindings are rejected. Reject when any
+blocker-severity finding exists or an acceptance criterion is unmet.
