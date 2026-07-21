@@ -72,13 +72,13 @@ jobs:
             sleep 0.25
           done
           curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null
-          install_root="${RUNNER_TEMP}/summoner release/bin"
-          SUMMONER_DOWNLOAD_URL="http://127.0.0.1:8765/${archive}" \
+          install_root="${RUNNER_TEMP}/summoner release"
+          SUMMONER_DOWNLOAD_URL="http://127.0.0.1:8765" \
           CARGO_DIST_FORCE_INSTALL_DIR="${install_root}" \
           SUMMONER_NO_MODIFY_PATH=1 \
             sh artifacts/summoner-installer.sh
           expected=$(jq -er '[.releases[] | select(.app_name == "summoner") | .app_version] | if length == 1 then .[0] else error("expected one Summoner release") end' <<<"${PLAN}")
-          test "$("${install_root}/summoner" --version)" = "summoner ${expected}"
+          test "$("${install_root}/bin/summoner" --version)" = "summoner ${expected}"
 
   shell-installer:
     runs-on: ubuntu-22.04
@@ -112,14 +112,14 @@ jobs:
             sleep 0.25
           done
           curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null
-          install_root="${RUNNER_TEMP}/summoner release/bin"
-          SUMMONER_DOWNLOAD_URL="http://127.0.0.1:8765/${archive}" \
+          install_root="${RUNNER_TEMP}/summoner release"
+          SUMMONER_DOWNLOAD_URL="http://127.0.0.1:8765" \
           CARGO_DIST_FORCE_INSTALL_DIR="${install_root}" \
           SUMMONER_NO_MODIFY_PATH=1 \
             sh artifacts/summoner-installer.sh
           expected=$(jq -er '[.releases[] | select(.app_name == "summoner") | .app_version] | if length == 1 then .[0] else error("expected one Summoner release") end' <<<"${PLAN}")
-          test "$("${install_root}/summoner" --version)" = "summoner ${expected}"
-          echo "SUMMONER_BIN=${install_root}/summoner" >> "${GITHUB_ENV}"
+          test "$("${install_root}/bin/summoner" --version)" = "summoner ${expected}"
+          echo "SUMMONER_BIN=${install_root}/bin/summoner" >> "${GITHUB_ENV}"
       - name: Install exact Grove 0.3.4
         shell: bash
         env:
@@ -131,7 +131,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -fLsS -O "${GROVE_RELEASE}/${archive}.sha256"
           shasum -a 256 -c "${archive}.sha256"
           mkdir -p "${RUNNER_TEMP}/grove/bin"
-          tar -xJf "${archive}" -C "${RUNNER_TEMP}/grove/bin"
+          tar -xJf "${archive}" -C "${RUNNER_TEMP}/grove/bin" --strip-components 1
           test "$("${RUNNER_TEMP}/grove/bin/grove" --version)" = "grove 0.3.4"
           echo "${RUNNER_TEMP}/grove/bin" >> "${GITHUB_PATH}"
       - name: Run installed reviewed fleet smoke
@@ -194,8 +194,8 @@ jobs:
             (map(.event) | index("run_started") != null and index("order_started") != null) and
             (last.event == "report") and
             (last.report.summary.approved == 1) and
-            (last.report.summary.error == 0) and
-            (last.report.summary.rejected == 0)
+            ((last.report.summary.error // 0) == 0) and
+            ((last.report.summary.rejected // 0) == 0)
           ' events.jsonl
 
   powershell-installer:
@@ -244,12 +244,14 @@ jobs:
               } catch { Start-Sleep -Milliseconds 250 }
             }
             if (!$ready) { throw 'artifact server did not become ready' }
-            $installRoot = Join-Path $env:RUNNER_TEMP 'summoner release/bin'
-            $env:SUMMONER_DOWNLOAD_URL = "http://127.0.0.1:8765/$archive"
+            $installRoot = Join-Path $env:RUNNER_TEMP 'summoner release'
+            $env:SUMMONER_DOWNLOAD_URL = "http://127.0.0.1:8765"
             $env:CARGO_DIST_FORCE_INSTALL_DIR = $installRoot
             $env:SUMMONER_NO_MODIFY_PATH = '1'
             & $installer
-            $summoner = Join-Path $installRoot 'summoner.exe'
+            $found = @(Get-ChildItem $installRoot -Recurse -File -Filter summoner.exe)
+            if ($found.Count -ne 1) { throw "expected exactly one installed summoner.exe, found $($found.Count)" }
+            $summoner = $found[0].FullName
             $releases = @((ConvertFrom-Json $env:PLAN).releases | Where-Object app_name -eq 'summoner')
             if ($releases.Count -ne 1) { throw "expected one Summoner release, found $($releases.Count)" }
             $version = & $summoner --version
@@ -272,12 +274,14 @@ jobs:
           $expected = (Get-Content "$archive.sha256").Split()[0].ToLowerInvariant()
           $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw 'Grove archive checksum mismatch' }
-          $bin = Join-Path $env:RUNNER_TEMP 'grove/bin'
-          Expand-Archive $archive -DestinationPath $bin
-          $version = & (Join-Path $bin 'grove.exe') --version
+          $root = Join-Path $env:RUNNER_TEMP 'grove'
+          Expand-Archive $archive -DestinationPath $root
+          $exe = @(Get-ChildItem $root -Recurse -File -Filter grove.exe)
+          if ($exe.Count -ne 1) { throw "expected exactly one grove.exe, found $($exe.Count)" }
+          $version = & $exe[0].FullName --version
           if ($version -ne 'grove 0.3.4') { throw "unexpected Grove version: $version" }
-          $bin | Out-File $env:GITHUB_PATH -Append
-          "GROVE_BIN=$(Join-Path $bin 'grove.exe')" | Out-File $env:GITHUB_ENV -Append
+          $exe[0].DirectoryName | Out-File $env:GITHUB_PATH -Append
+          "GROVE_BIN=$($exe[0].FullName)" | Out-File $env:GITHUB_ENV -Append
       - name: Run installed reviewed fleet smoke
         shell: pwsh
         run: |
@@ -343,6 +347,8 @@ jobs:
           }
           if ($events[-1].event -ne 'report') { throw 'reviewed fleet smoke did not end with report event' }
           $report = $events[-1].report
-          if ($report.summary.approved -ne 1 -or $report.summary.error -ne 0 -or $report.summary.rejected -ne 0) {
+          $summaryErrors = if ($report.summary.PSObject.Properties['error']) { $report.summary.error } else { 0 }
+          $summaryRejected = if ($report.summary.PSObject.Properties['rejected']) { $report.summary.rejected } else { 0 }
+          if ($report.summary.approved -ne 1 -or $summaryErrors -ne 0 -or $summaryRejected -ne 0) {
             throw "reviewed fleet smoke failed: $(Get-Content events.jsonl -Raw)"
           }
