@@ -47,53 +47,39 @@ jobs:
         with:
           tool: nextest@0.9.140
           fallback: none
-      - name: Install exact Grove 0.3.3 artifact (Unix)
+      # Grove has no published release yet; install from source at the exact
+      # commit the compatibility contract targets. Restore the checksum-verified
+      # artifact install with the first Grove GitHub release.
+      - name: Install Grove at the pinned commit (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        env:
-          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.3
         run: |
           set -euo pipefail
-          case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64) target=x86_64-unknown-linux-musl ;;
-            Darwin-arm64) target=aarch64-apple-darwin ;;
-            Darwin-x86_64) target=x86_64-apple-darwin ;;
-            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-          esac
-          archive="grove-${target}.tar.xz"
-          curl --proto '=https' --tlsv1.2 -fLsS -O "${GROVE_RELEASE}/${archive}"
-          curl --proto '=https' --tlsv1.2 -fLsS -O "${GROVE_RELEASE}/${archive}.sha256"
-          shasum -a 256 -c "${archive}.sha256"
-          mkdir -p "${RUNNER_TEMP}/grove/bin"
-          tar -xJf "${archive}" -C "${RUNNER_TEMP}/grove/bin"
+          cargo install --git https://github.com/thomgardiner/grove \
+            --rev b5ca0388b749ae1afb6df6b6ccb21821e7ae1f52 --locked \
+            --root "${RUNNER_TEMP}/grove"
           echo "${RUNNER_TEMP}/grove/bin" >> "${GITHUB_PATH}"
           echo "SUMMONER_TEST_GROVE=${RUNNER_TEMP}/grove/bin/grove" >> "${GITHUB_ENV}"
-      - name: Install exact Grove 0.3.3 artifact (Windows)
+      - name: Install Grove at the pinned commit (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.3
         run: |
-          $archive = "grove-x86_64-pc-windows-msvc.zip"
-          Invoke-WebRequest "$env:GROVE_RELEASE/$archive" -OutFile $archive
-          Invoke-WebRequest "$env:GROVE_RELEASE/$archive.sha256" -OutFile "$archive.sha256"
-          $expected = (Get-Content "$archive.sha256").Split()[0].ToLowerInvariant()
-          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "Grove archive checksum mismatch" }
+          cargo install --git https://github.com/thomgardiner/grove `
+            --rev b5ca0388b749ae1afb6df6b6ccb21821e7ae1f52 --locked `
+            --root (Join-Path $env:RUNNER_TEMP "grove")
           $bin = Join-Path $env:RUNNER_TEMP "grove/bin"
-          Expand-Archive $archive -DestinationPath $bin
           $bin | Out-File $env:GITHUB_PATH -Append
           "SUMMONER_TEST_GROVE=$(Join-Path $bin 'grove.exe')" | Out-File $env:GITHUB_ENV -Append
-      - name: Prove exact Grove release (Unix)
+      - name: Prove exact Grove version and capabilities (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          test "$("$SUMMONER_TEST_GROVE" --version)" = "grove 0.3.3"
+          test "$("$SUMMONER_TEST_GROVE" --version)" = "grove 0.3.4"
           "$SUMMONER_TEST_GROVE" capabilities > grove-capabilities.json
           node -e '
             const c = require("./grove-capabilities.json");
             if (
-              c.schema_version !== 1 || c.grove_version !== "0.3.3" ||
+              c.schema_version !== 1 || c.grove_version !== "0.3.4" ||
               c.status.repository_schema !== 1 || c.status.task_status_schema !== 3 || c.status.task_record_schema !== 5 ||
               c.inspection.binding_schema !== 1 || c.inspection.execution_schema !== 1 ||
               c.inspection.finish_source_cas !== true ||
@@ -102,15 +88,15 @@ jobs:
               c.inspection.output !== "captured_logs_json_report"
             ) process.exit(1);
           '
-      - name: Prove exact Grove release (Windows)
+      - name: Prove exact Grove version and capabilities (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $version = & $env:SUMMONER_TEST_GROVE --version
-          if ($version -ne "grove 0.3.3") { throw "unexpected Grove version: $version" }
+          if ($version -ne "grove 0.3.4") { throw "unexpected Grove version: $version" }
           $c = & $env:SUMMONER_TEST_GROVE capabilities | ConvertFrom-Json
           if (
-            $c.schema_version -ne 1 -or $c.grove_version -ne '0.3.3' -or
+            $c.schema_version -ne 1 -or $c.grove_version -ne '0.3.4' -or
             $c.status.repository_schema -ne 1 -or $c.status.task_status_schema -ne 3 -or $c.status.task_record_schema -ne 5 -or
             $c.inspection.binding_schema -ne 1 -or $c.inspection.execution_schema -ne 1 -or
             $c.inspection.finish_source_cas -ne $true -or

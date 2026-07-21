@@ -120,10 +120,10 @@ jobs:
           expected=$(jq -er '[.releases[] | select(.app_name == "summoner") | .app_version] | if length == 1 then .[0] else error("expected one Summoner release") end' <<<"${PLAN}")
           test "$("${install_root}/summoner" --version)" = "summoner ${expected}"
           echo "SUMMONER_BIN=${install_root}/summoner" >> "${GITHUB_ENV}"
-      - name: Install exact Grove 0.3.3
+      - name: Install exact Grove 0.3.4
         shell: bash
         env:
-          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.3
+          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.4
         run: |
           set -euo pipefail
           archive=grove-x86_64-unknown-linux-musl.tar.xz
@@ -132,7 +132,7 @@ jobs:
           shasum -a 256 -c "${archive}.sha256"
           mkdir -p "${RUNNER_TEMP}/grove/bin"
           tar -xJf "${archive}" -C "${RUNNER_TEMP}/grove/bin"
-          test "$("${RUNNER_TEMP}/grove/bin/grove" --version)" = "grove 0.3.3"
+          test "$("${RUNNER_TEMP}/grove/bin/grove" --version)" = "grove 0.3.4"
           echo "${RUNNER_TEMP}/grove/bin" >> "${GITHUB_PATH}"
       - name: Run installed reviewed fleet smoke
         shell: bash
@@ -258,10 +258,10 @@ jobs:
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
-      - name: Install exact Grove 0.3.3
+      - name: Install exact Grove 0.3.4
         shell: pwsh
         env:
-          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.3
+          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.4
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
@@ -275,7 +275,7 @@ jobs:
           $bin = Join-Path $env:RUNNER_TEMP 'grove/bin'
           Expand-Archive $archive -DestinationPath $bin
           $version = & (Join-Path $bin 'grove.exe') --version
-          if ($version -ne 'grove 0.3.3') { throw "unexpected Grove version: $version" }
+          if ($version -ne 'grove 0.3.4') { throw "unexpected Grove version: $version" }
           $bin | Out-File $env:GITHUB_PATH -Append
           "GROVE_BIN=$(Join-Path $bin 'grove.exe')" | Out-File $env:GITHUB_ENV -Append
       - name: Run installed reviewed fleet smoke
