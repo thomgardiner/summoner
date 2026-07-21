@@ -7,16 +7,16 @@ Summoner is a Rust-aware fleet runner for coding-agent CLIs. Codex, Claude Code,
 Summoner requires Grove. For published current releases, install both binaries:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/grove/releases/download/v0.3.3/grove-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/grove/releases/download/v0.3.4/grove-installer.sh | sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.sh | sh
 ```
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/grove/releases/download/v0.3.3/grove-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/grove/releases/download/v0.3.4/grove-installer.ps1 | iex"
 powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.ps1 | iex"
 ```
 
-Before the first release is published, build from a checkout with `cargo install --locked --path .`. Summoner requires the exact release-qualified Grove 0.3.3, Git, a Rust repository with real Grove verification profiles, and one installed/authenticated model CLI:
+Building from a checkout works too: `cargo install --locked --path .`. Summoner requires the exact release-qualified Grove 0.3.4, Git, a Rust repository with real Grove verification profiles, and one installed/authenticated model CLI:
 
 - [Codex install](https://github.com/openai/codex#installing-and-running-codex-cli) and [authentication](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt)
 - [Claude Code install](https://code.claude.com/docs/en/installation) and [authentication](https://code.claude.com/docs/en/authentication)
@@ -37,7 +37,7 @@ The final command prints lifecycle NDJSON as each Rust-aware order is claimed, b
 
 The first command installs the explicitly selected writable worker and separately named read-only/plan reviewer, initializes the repository contract, and writes the example order. It prints the exact `doctor`, `plan`, and `run` commands to use next. Existing global comments and unrelated settings survive; same-named custom executors are never overwritten. Codex and Claude auth checks are noninteractive and bounded to five seconds. Kimi currently exposes a config check but no reliable noninteractive auth-status check. Choosing the Kimi preset explicitly persists that acknowledgement for its two generated roles; custom unknown-auth backends fail closed until their exact names are listed in `allow_unknown_auth` in the personal global config, or a single invocation uses `--allow-unknown-auth`. Repository config cannot grant this acknowledgement.
 
-`doctor`, `run`, and `resume` share the same preflight: the exact Grove 0.3.3 machine-capability contract (task schemas, inspection schemas, process-tree supervision, read-only digest sealing, and captured logs), Git repository and author identity, verification-profile existence, executable/environment checks, and bounded model lifecycle diagnostics. An unreadable or malformed existing config is an error, never an ignored fallback.
+`doctor`, `run`, and `resume` share the same preflight: the exact Grove 0.3.4 machine-capability contract (task schemas, inspection schemas, process-tree supervision, read-only digest sealing, and captured logs), Git repository and author identity, verification-profile existence, executable/environment checks, and bounded model lifecycle diagnostics. An unreadable or malformed existing config is an error, never an ignored fallback.
 
 The older `summoner init --global --preset <name>` and `summoner init --example` forms remain available. In a Rust workspace without `.grove.toml`, `--example` creates a real required `rust-check` profile that runs `cargo check --workspace --all-targets --locked` through Grove. If the repository already owns `.grove.toml`, the example pins its one usable profile only when that profile is explicitly listed in `verification.required`, and never edits the file; a missing or ambiguous required profile is an actionable error, not a false-green demo.
 
@@ -115,7 +115,7 @@ The task status must show the terminal task state and its recorded verification.
 
 Set `default_reviewer = "<executor name>"` (or per-order `reviewer`; `reviewer = "none"` opts an order out) and every order that verifies is judged by an independently configured reviewer before it counts as green. Grove captures the still-live task into a standalone leased inspection capsule with no origin, shared Git metadata, or write-capable build lane; the reviewer runs only there under its configured native read-only/plan sandbox. The prompt contains the charter, requirements, verification evidence, live candidate diff, a random nonce, and exact snapshot/diff SHA-256 digests—never the implementing executor's transcript. The reviewer must return one strict protocol-v1 JSON object with those exact bindings; unknown fields, injected prose, stale/replayed bindings, oversized findings, process-tree leaks, source changes, or capsule changes void approval. Raw logs and their hashes remain in the run evidence. Approve upgrades `verified` to `approved`; reject lands as `rejected` with typed findings.
 
-The capsule is defense in depth, not a universal same-user OS sandbox: Grove 0.3.3 enforces read-only permissions plus before/after digests and uses a Windows Job Object or a best-effort Unix process group. A same-user process may be able to change permissions elsewhere on the host, so retain each vendor CLI's native sandbox and do not grant reviewer argv `{git_common_dir}`. File-routed reviewer prompts are rejected because the prompt lives outside the sealed capsule; shipped presets use argument or stdin routing.
+The capsule is defense in depth, not a universal same-user OS sandbox: Grove 0.3.4 enforces read-only permissions plus before/after digests and uses a Windows Job Object or a best-effort Unix process group. A same-user process may be able to change permissions elsewhere on the host, so retain each vendor CLI's native sandbox and do not grant reviewer argv `{git_common_dir}`. File-routed reviewer prompts are rejected because the prompt lives outside the sealed capsule; shipped presets use argument or stdin routing.
 
 ## Orchestrator profiles
 

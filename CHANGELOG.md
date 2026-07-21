@@ -1,11 +1,11 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 — 2026-07-21
 
 ### Added
 
 - Initial scaffold: configuration via `.summoner.toml`, work orders, and the `init` command that installs the config, the `AGENTS.md` orchestration contract, and the Claude skill. Existing files are skipped or appended to rather than replaced.
-- Fleet dispatch over grove 0.3.2 — `run`, `doctor`, `status`. Each order gets an isolated grove worktree with a scope-claimed task, runs the configured executor CLI under `grove task exec --timeout-secs`, drives finish-driven verification (runs exactly the profiles a structured refusal names), and emits one ranked JSON report saved as `report.json` under the run directory.
+- Fleet dispatch over grove (release-qualified compatibility contract: grove 0.3.4) — `run`, `doctor`, `status`. Each order gets an isolated grove worktree with a scope-claimed task, runs the configured executor CLI under `grove task exec --timeout-secs`, drives finish-driven verification (runs exactly the profiles a structured refusal names), and emits one ranked JSON report saved as `report.json` under the run directory.
 - `{git_common_dir}` placeholder so sandboxed executors can commit from a linked worktree whose index and locks live under the main repository's `.git/worktrees/`.
 - `after` field: one run executes a dependency DAG of orders. A ready queue dispatches an order once every dependency reached `verified` or `completed`; dependents of failed orders are reported `skipped` with the dependency's outcome named; unknown references, self-references, and cycles are rejected at validation.
 - `--stream`: lifecycle events are appended to the authoritative, flushed `events.jsonl` and mirrored to stdout as NDJSON, ending with a single-line `report` event. A full `order_checkpoint` preserves the gate result before cleanup, and `report.json` is projected from terminal journal records.
@@ -28,4 +28,4 @@
 
 ### Verification
 
-- Summoner `bafc63c`: 100/100 Nextest tests, strict workspace/all-target Clippy, and format check passed. Grove `0cbe828`: 303/303 Nextest tests, strict Clippy, format check, and workspace doctests passed. No release was published from these checks.
+- Release tip: 159/159 Nextest tests, strict workspace/all-target Clippy, and format check passed against the release-qualified Grove 0.3.4 contract; CI fleet lifecycle jobs green on Ubuntu, macOS, and Windows.
