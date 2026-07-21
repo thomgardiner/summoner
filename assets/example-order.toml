@@ -10,3 +10,4 @@ acceptance = [
   "the change is committed",
 ]
 timeout_secs = 600
+verify_profile = "rust-check"

@@ -304,6 +304,12 @@ impl<'a> OrderRun<'a> {
             return self.done(report, Some("summoner: interrupted by operator"));
         }
 
+        let expected_source = match decision.as_ref() {
+            Some(ReviewDecision::Approve(source) | ReviewDecision::Reject(source)) => {
+                Some(source.as_str())
+            }
+            _ => None,
+        };
         finish_task(
             self.ctx,
             self.order,
@@ -311,6 +317,7 @@ impl<'a> OrderRun<'a> {
             &self.worktree,
             report,
             &mut ran,
+            expected_source,
         )?;
         self.map_review(report, decision);
 
@@ -382,6 +389,7 @@ impl<'a> OrderRun<'a> {
             timeout_secs: self.timeout_secs,
             shutdown: &SHUTDOWN,
             argv: template,
+            resume: resumed,
             session_id: report.session_id.as_deref().unwrap_or(""),
             prompt: &prompt,
             file_prefix: prefix,
@@ -493,13 +501,13 @@ impl<'a> OrderRun<'a> {
             return;
         }
         match decision {
-            Some(ReviewDecision::Approve) if report.outcome == Outcome::Verified => {
+            Some(ReviewDecision::Approve(_)) if report.outcome == Outcome::Verified => {
                 report.outcome = Outcome::Approved;
             }
             // Completed stays completed: approval cannot substitute for the
             // verification the repository never required.
-            Some(ReviewDecision::Approve) | None => {}
-            Some(ReviewDecision::Reject) => {
+            Some(ReviewDecision::Approve(_)) | None => {}
+            Some(ReviewDecision::Reject(_)) => {
                 report.outcome = Outcome::Rejected;
                 report.detail = Some("review rejected; see review findings".into());
             }

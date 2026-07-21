@@ -1,0 +1,6 @@
+[verification]
+required = ["rust-check"]
+
+[verification.profiles.rust-check]
+continue_on_failure = false
+commands = [{ argv = ["cargo", "check", "--workspace", "--all-targets", "--locked"], allow_zero_tests = true }]

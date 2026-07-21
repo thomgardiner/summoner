@@ -73,7 +73,7 @@ pub(crate) fn execute(
     std::fs::create_dir_all(&run_dir)
         .with_context(|| format!("creating run dir {}", run_dir.display()))?;
 
-    crate::run_evidence::write_manifest(
+    let config = crate::run_evidence::write_manifest(
         &run_dir,
         &run_id,
         &repo,
@@ -104,7 +104,7 @@ pub(crate) fn execute(
         }),
     )?;
     let ctx = Ctx {
-        config,
+        config: &config,
         grove,
         repo: repo.clone(),
         run_dir: run_dir.clone(),

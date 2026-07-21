@@ -135,6 +135,31 @@ impl GroveCli {
         compat::check(self)
     }
 
+    pub fn cargo_generate_lockfile(&self, repo: &Path) -> Result<()> {
+        let out = self.call(
+            repo,
+            &[
+                "exec",
+                "--tag",
+                "summoner-init-lock",
+                "--",
+                "cargo",
+                "generate-lockfile",
+            ],
+        )?;
+        if out.code != 0 {
+            bail!(
+                "grove could not generate Cargo.lock for the demo (exit {}): {}",
+                out.code,
+                out.stderr.trim()
+            );
+        }
+        if !repo.join("Cargo.lock").is_file() {
+            bail!("grove completed lockfile generation without creating Cargo.lock");
+        }
+        Ok(())
+    }
+
     /// `worktree acquire` prints one bare path on stdout, not JSON.
     pub fn worktree_acquire(
         &self,
@@ -211,13 +236,17 @@ impl GroveCli {
         worktree: &Path,
         task_id: &str,
         allow_unverified: Option<&str>,
+        expected_source_sha256: Option<&str>,
     ) -> Result<FinishOutcome> {
         let mut args = vec!["task", "finish", "--task-id", task_id];
         if let Some(reason) = allow_unverified {
             args.extend(["--allow-unverified", reason]);
         }
+        if let Some(digest) = expected_source_sha256 {
+            args.extend(["--expected-source-sha256", digest]);
+        }
         let value = self.domain(worktree, &args)?;
-        parse_finish(value)
+        parse_finish(value, expected_source_sha256)
     }
 
     pub fn task_abandon(&self, worktree: &Path, task_id: &str, reason: &str) -> Result<()> {
@@ -281,7 +310,10 @@ fn parse_begin(value: serde_json::Value) -> Result<BeginOutcome> {
 }
 
 /// Success has no "outcome" key (stable FinishReport shape); refusals do.
-fn parse_finish(value: serde_json::Value) -> Result<FinishOutcome> {
+fn parse_finish(
+    value: serde_json::Value,
+    expected_source_sha256: Option<&str>,
+) -> Result<FinishOutcome> {
     if value.get("outcome").is_some() {
         Ok(FinishOutcome::Refused {
             reason: value["reason"].as_str().unwrap_or("unknown").to_string(),
@@ -290,6 +322,12 @@ fn parse_finish(value: serde_json::Value) -> Result<FinishOutcome> {
             verification: serde_json::from_value(value["verification"].clone()).ok(),
         })
     } else {
+        let source_sha256 = value["source_sha256"].as_str().map(String::from);
+        if let Some(expected) = expected_source_sha256
+            && source_sha256.as_deref() != Some(expected)
+        {
+            bail!("Grove finish did not return the expected candidate source digest")
+        }
         Ok(FinishOutcome::Finished {
             verification: serde_json::from_value(value["verification"].clone())
                 .context("parsing finish verification")?,
@@ -298,88 +336,5 @@ fn parse_finish(value: serde_json::Value) -> Result<FinishOutcome> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn begin_outcomes_parse_both_arms() {
-        let begun: BeginOutcome = serde_json::from_str(
-            r#"{"outcome":"begun","task":{"id":"abc-1","agent":"smn-x","extra_future_field":1}}"#,
-        )
-        .unwrap();
-        let BeginOutcome::Begun { task } = begun else {
-            panic!("expected begun");
-        };
-        assert_eq!(task.id, "abc-1");
-
-        let conflict: BeginOutcome = serde_json::from_str(
-            r#"{"outcome":"conflict","requested":["src"],"conflicts":[{"agent":"other"}]}"#,
-        )
-        .unwrap();
-        let BeginOutcome::Conflict { conflicts } = conflict else {
-            panic!("expected conflict");
-        };
-        assert_eq!(conflicts.len(), 1);
-    }
-
-    #[test]
-    fn finish_success_and_refusals_are_distinguished_by_the_outcome_key() {
-        let finished = parse_finish(serde_json::json!({
-            "task": {"id": "t", "verification": "passed"},
-            "verification": {"required": ["fast"], "passed": ["fast"], "missing": [],
-                             "stale": [], "failed": [], "verified": true}
-        }))
-        .unwrap();
-        let FinishOutcome::Finished { verification } = finished else {
-            panic!("expected finished");
-        };
-        assert!(verification.verified);
-
-        let refused = parse_finish(serde_json::json!({
-            "outcome": "refused", "reason": "evidence",
-            "verification": {"required": ["fast", "ci"], "passed": [], "missing": ["fast", "ci"],
-                             "stale": [], "failed": [], "verified": false}
-        }))
-        .unwrap();
-        let FinishOutcome::Refused {
-            reason,
-            verification,
-            ..
-        } = refused
-        else {
-            panic!("expected refusal");
-        };
-        assert_eq!(reason, "evidence");
-        assert_eq!(verification.unwrap().missing, ["fast", "ci"]);
-
-        let scope = parse_finish(serde_json::json!({
-            "outcome": "refused", "reason": "scope", "outside_scope": ["README.md"]
-        }))
-        .unwrap();
-        let FinishOutcome::Refused { outside_scope, .. } = scope else {
-            panic!("expected refusal");
-        };
-        assert_eq!(outside_scope, ["README.md"]);
-    }
-
-    #[test]
-    fn exec_argv_wraps_the_executor_behind_the_supervisor() {
-        let grove = GroveCli::new("grove".into());
-        let argv = grove.exec_argv("t-1", 900, &["codex".into(), "exec".into()]);
-        assert_eq!(
-            argv,
-            [
-                "grove",
-                "task",
-                "exec",
-                "--task-id",
-                "t-1",
-                "--timeout-secs",
-                "900",
-                "--",
-                "codex",
-                "exec"
-            ]
-        );
-    }
-}
+#[path = "grove_tests.rs"]
+mod tests;

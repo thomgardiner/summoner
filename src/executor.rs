@@ -34,6 +34,7 @@ pub struct ExecRequest<'a> {
     /// The argv template for this spawn. The caller picks the backend's
     /// `argv`, or its `resume_argv` when a revision continues a session.
     pub argv: &'a [String],
+    pub resume: bool,
     /// Captured session identifier substituted into `{session_id}`; empty
     /// when no session is being resumed.
     pub session_id: &'a str,
@@ -159,6 +160,14 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
         &prompt_path,
         req.session_id,
     );
+    let expected = if req.resume {
+        req.backend.resume_provenance.as_ref()
+    } else {
+        req.backend.provenance.as_ref()
+    }
+    .context("executor launch lacks immutable binary provenance")?;
+    crate::backend_provenance::require_current(expected, &executor_argv[0], req.worktree)
+        .context("validating executor binary immediately before launch")?;
     let argv = req
         .grove
         .exec_argv(req.task_id, req.timeout_secs, &executor_argv);

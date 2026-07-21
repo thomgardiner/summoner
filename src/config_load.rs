@@ -46,13 +46,7 @@ pub(crate) fn grove_profiles(cwd: &Path) -> Result<GroveProfiles> {
         .and_then(toml::Value::as_str)
         .filter(|name| names.contains(*name))
         .map(String::from);
-    let selected = required.or_else(|| {
-        if names.len() == 1 {
-            names.iter().next().cloned()
-        } else {
-            None
-        }
-    });
+    let selected = required;
     Ok(GroveProfiles {
         path: Some(path),
         names,
@@ -284,6 +278,6 @@ mod tests {
         .unwrap();
         let profiles = grove_profiles(dir.path()).unwrap();
         assert_eq!(profiles.names, BTreeSet::from(["real".to_string()]));
-        assert_eq!(profiles.selected.as_deref(), Some("real"));
+        assert_eq!(profiles.selected, None);
     }
 }

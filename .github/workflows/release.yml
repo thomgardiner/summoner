@@ -15,7 +15,7 @@
 
 name: Release
 permissions:
-  "contents": "write"
+  "contents": "read"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -121,9 +121,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
     permissions:
-      "attestations": "write"
       "contents": "read"
-      "id-token": "write"
     steps:
       - name: enable windows longpaths
         run: |
@@ -156,11 +154,7 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
-      - name: Attest
-        if: needs.plan.outputs.publishing == 'true'
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
-        with:
-          subject-path: "target/distrib/*${{ join(matrix.targets, ', ') }}*"
+
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
@@ -284,16 +278,40 @@ jobs:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
 
+  attest-release:
+    needs:
+      - plan
+      - custom-release-qualification
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.custom-release-qualification.result == 'success' }}
+    permissions:
+      "attestations": "write"
+      "contents": "read"
+      "id-token": "write"
+    runs-on: "ubuntu-22.04"
+    steps:
+      - name: Download qualified release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: qualified-release-files
+          path: release-assets
+      - name: Attest qualified release files
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-path: "release-assets/*"
+
   # Create a GitHub Release while uploading all files to it
   announce:
     needs:
       - plan
       - host
       - custom-release-qualification
+      - attest-release
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && needs.custom-release-qualification.result == 'success' }}
+    if: ${{ always() && needs.host.result == 'success' && needs.custom-release-qualification.result == 'success' && needs.attest-release.result == 'success' }}
+    permissions:
+      "contents": "write"
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

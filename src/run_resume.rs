@@ -220,13 +220,14 @@ struct TaskEvidence {
     id: String,
     status: String,
     recorded_verification: String,
+    source_sha256: Option<String>,
 }
 
 fn task_evidence(value: serde_json::Value) -> Result<BTreeMap<String, TaskEvidence>> {
     let board: TaskBoard = serde_json::from_value(value).context("parsing Grove task status")?;
-    if board.schema_version != 2 {
+    if board.schema_version != 3 {
         bail!(
-            "Grove task status schema {} cannot reconcile durable verification; need schema 2",
+            "Grove task status schema {} cannot reconcile durable approval; need schema 3",
             board.schema_version
         );
     }
@@ -284,6 +285,14 @@ fn agree(order: &Order, config: &Config, report: &OrderReport, task: &TaskEviden
                 bail!(
                     "order {:?} approval disagrees with its recorded reviewer",
                     order.id
+                );
+            }
+            if task.source_sha256.as_deref() != Some(review.candidate_snapshot_sha256.as_str()) {
+                bail!(
+                    "order {:?} approval snapshot {} disagrees with Grove task source {:?}",
+                    order.id,
+                    review.candidate_snapshot_sha256,
+                    task.source_sha256,
                 );
             }
         }

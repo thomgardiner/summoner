@@ -23,7 +23,7 @@ pub(crate) fn write_manifest(
     grove_version: &str,
     config: &Config,
     orders: &[Order],
-) -> Result<()> {
+) -> Result<Config> {
     let manifest = manifest(
         run_id,
         repo,
@@ -34,7 +34,9 @@ pub(crate) fn write_manifest(
     )?;
     let text = serde_json::to_vec_pretty(&manifest).context("serializing manifest.json")?;
     reject_values(&text, &manifest.backends)?;
-    write_new(&dir.join("manifest.json"), &text)
+    let bound = crate::run_manifest::bound_config(&manifest, config)?;
+    write_new(&dir.join("manifest.json"), &text)?;
+    Ok(bound)
 }
 
 fn manifest(
@@ -57,9 +59,9 @@ fn manifest(
         .into_iter()
         .map(|name| {
             let backend = config.executors.get(&name).expect("validated backend");
-            (name, Backend::from(backend))
+            Ok((name, Backend::capture(backend, repo)?))
         })
-        .collect();
+        .collect::<Result<_>>()?;
     let orders = orders
         .iter()
         .map(|order| {
@@ -233,13 +235,15 @@ mod tests {
         config.executors.insert(
             "test".into(),
             ExecutorBackend {
-                argv: vec![],
+                argv: vec![std::env::current_exe().unwrap().display().to_string()],
                 prompt: None,
                 timeout_secs: None,
                 env_required: vec![var.into()],
                 usage_marker: None,
                 session_marker: None,
                 resume_argv: vec![],
+                provenance: None,
+                resume_provenance: None,
             },
         );
         let order = Order {
@@ -263,7 +267,8 @@ mod tests {
         };
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
         let error = write_manifest(dir.path(), "run", repo, None, "grove", &config, &[order])
-            .unwrap_err()
+            .err()
+            .expect("secret must reject the manifest")
             .to_string();
         unsafe { std::env::remove_var(var) };
         assert!(error.contains(var));
@@ -272,9 +277,9 @@ mod tests {
     }
 
     #[test]
-    fn manifest_json_contract_is_exact() {
+    fn manifest_records_backend_executable_provenance() {
         let manifest = Manifest {
-            schema_version: 2,
+            schema_version: 3,
             run_id: "run-1".into(),
             repository: "/repo".into(),
             start_head: "abc".into(),
@@ -325,12 +330,25 @@ mod tests {
                     usage_marker: None,
                     session_marker: None,
                     env_required: vec!["TOKEN".into()],
+                    provenance: crate::backend_provenance::capture(
+                        std::env::current_exe().unwrap().to_str().unwrap(),
+                        Path::new(env!("CARGO_MANIFEST_DIR")),
+                    )
+                    .unwrap(),
+                    resume_provenance: None,
                 },
             )]),
         };
-        assert_eq!(
-            serde_json::to_string(&manifest).unwrap(),
-            r#"{"schema_version":2,"run_id":"run-1","repository":"/repo","start_head":"abc","selected_profile":"codex","summoner_version":"0.1.0","grove_version":"grove 0.3.2","settings":{"max_parallel":2,"default_verify_profile":null,"order_timeout_secs":600,"keep_failed_worktrees":false,"fail_fast":null,"revise":0,"run_token_budget":null},"orders":[{"source_path":"/repo/a.toml","source_text":"id = \\\"a\\\"\\n","expanded":{"id":"a","title":"A","brief":"B","scope":["src"],"acceptance":[],"verify_profile":null,"executor":"codex","reviewer":null,"timeout_secs":null,"max_tokens":null,"base":null,"branch":null,"after":[],"claim_group":null,"variant_of":null},"roles":{"executor":"codex","reviewer":null}}],"backends":{"codex":{"argv":["codex"],"resume_argv":[],"prompt":"arg","timeout_secs":null,"usage_marker":null,"session_marker":null,"env_required":["TOKEN"]}}}"#
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(value["schema_version"], 3);
+        let provenance = &value["backends"]["codex"]["provenance"];
+        assert!(
+            provenance["resolved_path"]
+                .as_str()
+                .unwrap()
+                .contains("summoner")
         );
+        assert_eq!(provenance["binary_sha256"].as_str().unwrap().len(), 64);
+        assert!(provenance["version_output"].is_string());
     }
 }

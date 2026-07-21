@@ -12,8 +12,8 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 pub(crate) enum ReviewDecision {
-    Approve,
-    Reject,
+    Approve(String),
+    Reject(String),
     Failed(String),
     Interrupted,
 }
@@ -45,10 +45,6 @@ pub(crate) fn run(
     let timeout = backend
         .timeout_secs
         .unwrap_or_else(|| ctx.config.order_timeout_secs());
-    let diff = git(worktree, &["diff", base]).context("collecting review diff")?;
-    let stat = git(worktree, &["diff", "--stat", base]).context("collecting review diff stat")?;
-    let status = git(worktree, &["status", "--porcelain"]).context("collecting review status")?;
-    let diff_sha256 = review::sha256(diff.as_bytes());
     let lease = timeout.saturating_add(120).clamp(1, 86_400);
     let acquired = ctx.grove.inspection_acquire(worktree, task_id, lease)?;
     if acquired.schema_version != 1 || acquired.task_id != task_id {
@@ -56,6 +52,13 @@ pub(crate) fn run(
         bail!("Grove returned an incompatible inspection binding")
     }
     let result = (|| -> Result<ReviewDecision> {
+        let diff = git(&acquired.path, &["diff", base])
+            .context("collecting review diff from inspection capsule")?;
+        let stat = git(&acquired.path, &["diff", "--stat", base])
+            .context("collecting review diff stat from inspection capsule")?;
+        let status = git(&acquired.path, &["status", "--porcelain"])
+            .context("collecting review status from inspection capsule")?;
+        let diff_sha256 = review::sha256(diff.as_bytes());
         let binding = Binding::new(acquired.source_sha256.clone(), diff_sha256, reviewer)?;
         let evidence = Evidence {
             base,
@@ -133,11 +136,21 @@ fn reviewer_argv(
         prompt_path,
         "",
     );
+    let provenance = backend
+        .provenance
+        .as_ref()
+        .context("reviewer launch lacks immutable binary provenance")?;
     let mut argv = vec![
         std::env::current_exe()?.display().to_string(),
         "__review-worker".into(),
         "--prompt-file".into(),
         prompt_path.display().to_string(),
+        "--expected-path".into(),
+        provenance.resolved_path.clone(),
+        "--expected-sha256".into(),
+        provenance.binary_sha256.clone(),
+        "--expected-prompt-sha256".into(),
+        review::sha256(prompt.as_bytes()),
     ];
     if backend.routing() == PromptRouting::Stdin {
         argv.push("--stdin".into());
@@ -221,11 +234,11 @@ fn evaluate(
                 match envelope.verdict {
                     Verdict::Approve => {
                         summary.verdict = "approve".into();
-                        ReviewDecision::Approve
+                        ReviewDecision::Approve(binding.candidate_snapshot_sha256.clone())
                     }
                     Verdict::Reject => {
                         summary.verdict = "reject".into();
-                        ReviewDecision::Reject
+                        ReviewDecision::Reject(binding.candidate_snapshot_sha256.clone())
                     }
                 }
             }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Manifest {
@@ -76,6 +76,8 @@ pub(crate) struct Backend {
     pub(crate) usage_marker: Option<String>,
     pub(crate) session_marker: Option<String>,
     pub(crate) env_required: Vec<String>,
+    pub(crate) provenance: crate::backend_provenance::Provenance,
+    pub(crate) resume_provenance: Option<crate::backend_provenance::Provenance>,
 }
 
 pub(crate) struct Replay {
@@ -91,7 +93,7 @@ pub(crate) fn replay(dir: &Path, run_id: &str, current: &Config) -> Result<Repla
     )
     .context("parsing immutable run manifest")?;
     validate(&manifest, run_id)?;
-    let config = config(&manifest, current)?;
+    let config = bound_config(&manifest, current)?;
     let orders = orders(dir, &manifest)?;
     let orders = crate::run_prepare::checked(orders, &config)?;
     Ok(Replay {
@@ -132,8 +134,26 @@ fn validate(manifest: &Manifest, run_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn config(manifest: &Manifest, current: &Config) -> Result<Config> {
+pub(crate) fn bound_config(manifest: &Manifest, current: &Config) -> Result<Config> {
+    let repo = Path::new(&manifest.repository);
+    for (name, backend) in &manifest.backends {
+        let binary = backend
+            .argv
+            .first()
+            .ok_or_else(|| anyhow!("run manifest backend {name:?} has an empty argv"))?;
+        crate::backend_provenance::require_current(&backend.provenance, binary, repo)
+            .with_context(|| format!("validating recorded backend {name:?}"))?;
+        if let Some(expected) = &backend.resume_provenance {
+            let resume = backend.resume_argv.first().ok_or_else(|| {
+                anyhow!("run manifest backend {name:?} has resume provenance but no resume argv")
+            })?;
+            crate::backend_provenance::require_current(expected, resume, repo)
+                .with_context(|| format!("validating recorded resume backend {name:?}"))?;
+        }
+    }
     let mut config = Config {
+        default_executor: current.default_executor(),
+        default_reviewer: current.default_reviewer(),
         max_parallel: Some(manifest.settings.max_parallel),
         default_verify_profile: manifest.settings.default_verify_profile.clone(),
         order_timeout_secs: Some(manifest.settings.order_timeout_secs),
@@ -236,17 +256,35 @@ impl From<&Order> for ExpandedOrder {
     }
 }
 
-impl From<&ExecutorBackend> for Backend {
-    fn from(backend: &ExecutorBackend) -> Self {
-        Self {
-            argv: backend.argv.clone(),
-            resume_argv: backend.resume_argv.clone(),
+impl Backend {
+    pub(crate) fn capture(backend: &ExecutorBackend, repo: &Path) -> Result<Self> {
+        let binary = backend
+            .argv
+            .first()
+            .context("validated executor has an empty argv")?;
+        let provenance = crate::backend_provenance::capture(binary, repo)?;
+        let resume_provenance = backend
+            .resume_argv
+            .first()
+            .map(|binary| crate::backend_provenance::capture(binary, repo))
+            .transpose()?;
+        let mut argv = backend.argv.clone();
+        argv[0] = provenance.resolved_path.clone();
+        let mut resume_argv = backend.resume_argv.clone();
+        if let (Some(binary), Some(expected)) = (resume_argv.first_mut(), &resume_provenance) {
+            *binary = expected.resolved_path.clone();
+        }
+        Ok(Self {
+            argv,
+            resume_argv,
             prompt: backend.routing(),
             timeout_secs: backend.timeout_secs,
             usage_marker: backend.usage_marker.clone(),
             session_marker: backend.session_marker.clone(),
             env_required: backend.env_required.clone(),
-        }
+            provenance,
+            resume_provenance,
+        })
     }
 }
 
@@ -260,6 +298,38 @@ impl From<&Backend> for ExecutorBackend {
             usage_marker: backend.usage_marker.clone(),
             session_marker: backend.session_marker.clone(),
             resume_argv: backend.resume_argv.clone(),
+            provenance: Some(backend.provenance.clone()),
+            resume_provenance: backend.resume_provenance.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captured_backend_launches_the_canonical_recorded_binary() {
+        let executable = std::env::current_exe().unwrap();
+        let backend = ExecutorBackend {
+            argv: vec![executable.display().to_string(), "run".into()],
+            prompt: None,
+            timeout_secs: None,
+            env_required: vec![],
+            usage_marker: None,
+            session_marker: None,
+            resume_argv: vec![executable.display().to_string(), "resume".into()],
+            provenance: None,
+            resume_provenance: None,
+        };
+        let captured = Backend::capture(&backend, Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let bound = ExecutorBackend::from(&captured);
+        assert_eq!(bound.argv[0], captured.provenance.resolved_path);
+        assert_eq!(
+            bound.resume_argv[0],
+            captured.resume_provenance.as_ref().unwrap().resolved_path
+        );
+        assert_eq!(bound.provenance, Some(captured.provenance));
+        assert_eq!(bound.resume_provenance, captured.resume_provenance);
     }
 }

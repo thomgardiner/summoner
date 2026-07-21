@@ -136,7 +136,7 @@ fn require_grove(grove: &str) {
         .expect("run Grove compatibility probe");
     assert_success(&status);
     let value: Value = serde_json::from_slice(&status.stdout).expect("parse Grove task status");
-    assert_eq!(value["schema_version"], 2, "wrong Grove task schema");
+    assert_eq!(value["schema_version"], 3, "wrong Grove task schema");
 }
 
 fn git(repo: &Path, args: &[&str]) {

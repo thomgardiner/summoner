@@ -181,7 +181,7 @@ jobs:
           git init -q
           git config user.name release-smoke
           git config user.email release-smoke@example.com
-          printf '%s\n' '[verification]' 'required = ["fast"]' '[verification.profiles.fast]' 'commands = [{ argv = ["git", "diff", "--check"] }]' > .grove.toml
+          printf '%s\n' '[verification]' 'required = ["fast"]' '[verification.profiles.fast]' 'continue_on_failure = false' 'commands = [{ argv = ["git", "diff", "--check"], allow_zero_tests = true }]' > .grove.toml
           export XDG_CONFIG_HOME="${smoke}/config"
           export PATH="${smoke}/fake-bin:${RUNNER_TEMP}/grove/bin:${PATH}"
           "${SUMMONER_BIN}" init --preset codex --example
@@ -326,7 +326,8 @@ jobs:
           [verification]
           required = ["fast"]
           [verification.profiles.fast]
-          commands = [{ argv = ["git", "diff", "--check"] }]
+          continue_on_failure = false
+          commands = [{ argv = ["git", "diff", "--check"], allow_zero_tests = true }]
           '@ | Set-Content .grove.toml
           $env:APPDATA = Join-Path $smoke 'config'
           $env:PATH = "$fake;$(Split-Path $env:GROVE_BIN);$env:PATH"

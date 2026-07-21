@@ -62,6 +62,7 @@ pub(crate) fn finish_task(
     worktree: &Path,
     report: &mut OrderReport,
     ran: &mut std::collections::BTreeSet<String>,
+    expected_source_sha256: Option<&str>,
 ) -> Result<()> {
     let _ = order;
     for attempt in 0..2 {
@@ -70,7 +71,10 @@ pub(crate) fn finish_task(
             report.detail = Some("interrupted during verification".into());
             return Ok(());
         }
-        match ctx.grove.task_finish(worktree, task_id, None)? {
+        match ctx
+            .grove
+            .task_finish(worktree, task_id, None, expected_source_sha256)?
+        {
             FinishOutcome::Finished { verification } => {
                 report.finish = Some(verification);
                 report.outcome = Outcome::Verified;
@@ -84,6 +88,13 @@ pub(crate) fn finish_task(
                 if reason == "scope" {
                     report.outcome = Outcome::ScopeViolation;
                     report.detail = Some(format!("out of scope: {}", outside_scope.join(", ")));
+                    return Ok(());
+                }
+                if reason == "source_changed" {
+                    report.outcome = Outcome::Unverified;
+                    report.detail = Some(
+                        "candidate changed after review; the bound verdict was not applied".into(),
+                    );
                     return Ok(());
                 }
                 // No verification block means grove refused for a reason this
@@ -108,9 +119,12 @@ pub(crate) fn finish_task(
                     // never mark this verified. Finish with the override on
                     // the record and report it as completed, not verified.
                     let reason = "summoner: repository declares no required verification profiles";
-                    if let FinishOutcome::Finished { verification } =
-                        ctx.grove.task_finish(worktree, task_id, Some(reason))?
-                    {
+                    if let FinishOutcome::Finished { verification } = ctx.grove.task_finish(
+                        worktree,
+                        task_id,
+                        Some(reason),
+                        expected_source_sha256,
+                    )? {
                         report.finish = Some(verification);
                         report.outcome = Outcome::Completed;
                         report.detail = Some(reason.to_string());

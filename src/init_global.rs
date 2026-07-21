@@ -4,6 +4,11 @@ use crate::presets::{self, Preset, PresetName};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn global(name: Option<PresetName>) -> Result<Report> {
     let path = crate::config::global_path().context("no platform config directory available")?;
@@ -31,11 +36,103 @@ pub fn global(name: Option<PresetName>) -> Result<Report> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("creating global config directory")?;
     }
-    std::fs::write(&path, updated).context("writing global config")?;
+    write_atomic(&path, updated.as_bytes()).context("writing global config")?;
     Ok(Report {
         written: vec![path.display().to_string()],
         skipped: Vec::new(),
     })
+}
+
+pub(super) fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    write_atomic_with(path, contents, replace)
+}
+
+pub(super) fn write_atomic_with(
+    path: &Path,
+    contents: &[u8],
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let parent = path.parent().context("global config path has no parent")?;
+    let permissions = std::fs::metadata(path)
+        .map(|metadata| Some(metadata.permissions()))
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(error)
+            }
+        })?;
+    let (mut file, temporary) = create_temporary(parent, path)?;
+    let result = (|| -> Result<()> {
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        replace(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn create_temporary(parent: &Path, path: &Path) -> Result<(std::fs::File, PathBuf)> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    for _ in 0..128 {
+        let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(".{name}.summoner-{}-{id}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((file, temporary)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    bail!("could not reserve a temporary global config file")
+}
+
+#[cfg(not(windows))]
+fn replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let source = wide(source);
+    let destination = wide(destination);
+    // SAFETY: both paths are valid, NUL-terminated UTF-16 buffers that remain
+    // alive for the duration of the call. The temp file is in the destination
+    // directory, so the operation cannot degrade into a cross-volume copy.
+    let succeeded = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn install(path: &std::path::Path, existing: &str, preset: &Preset) -> Result<String> {
@@ -244,5 +341,42 @@ mod tests {
         assert!(installed.contains("# keep\r\n"));
         assert!(installed.contains("[profiles.mine]\r\n"));
         toml::from_str::<Config>(&installed).unwrap();
+    }
+
+    #[test]
+    fn failed_atomic_replace_preserves_original_and_removes_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, b"original").unwrap();
+
+        let error = write_atomic_with(&path, b"replacement", |temporary, destination| {
+            assert_eq!(std::fs::read(temporary).unwrap(), b"replacement");
+            assert_eq!(std::fs::read(destination).unwrap(), b"original");
+            Err(std::io::Error::other("injected replace failure"))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected replace failure"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_preserves_existing_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        write_atomic(&path, b"replacement").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
 }

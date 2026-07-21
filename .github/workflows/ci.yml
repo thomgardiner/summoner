@@ -33,7 +33,7 @@ jobs:
         with:
           tool: nextest@0.9.140
           fallback: none
-      - run: cargo nextest run --locked --no-tests fail --bins --test setup
+      - run: cargo nextest run --locked --no-tests fail --bins --test setup --test init_atomic
 
   fleet:
     runs-on: ${{ matrix.os }}
@@ -94,8 +94,9 @@ jobs:
             const c = require("./grove-capabilities.json");
             if (
               c.schema_version !== 1 || c.grove_version !== "0.3.3" ||
-              c.status.repository_schema !== 1 || c.status.task_status_schema !== 2 || c.status.task_record_schema !== 4 ||
+              c.status.repository_schema !== 1 || c.status.task_status_schema !== 3 || c.status.task_record_schema !== 5 ||
               c.inspection.binding_schema !== 1 || c.inspection.execution_schema !== 1 ||
+              c.inspection.finish_source_cas !== true ||
               c.inspection.process_tree !== "unix_process_group_best_effort" ||
               c.inspection.filesystem !== "read_only_permissions_and_digest" ||
               c.inspection.output !== "captured_logs_json_report"
@@ -110,14 +111,19 @@ jobs:
           $c = & $env:SUMMONER_TEST_GROVE capabilities | ConvertFrom-Json
           if (
             $c.schema_version -ne 1 -or $c.grove_version -ne '0.3.3' -or
-            $c.status.repository_schema -ne 1 -or $c.status.task_status_schema -ne 2 -or $c.status.task_record_schema -ne 4 -or
+            $c.status.repository_schema -ne 1 -or $c.status.task_status_schema -ne 3 -or $c.status.task_record_schema -ne 5 -or
             $c.inspection.binding_schema -ne 1 -or $c.inspection.execution_schema -ne 1 -or
+            $c.inspection.finish_source_cas -ne $true -or
             $c.inspection.process_tree -ne 'windows_job_object' -or
             $c.inspection.filesystem -ne 'read_only_permissions_and_digest' -or
             $c.inspection.output -ne 'captured_logs_json_report'
           ) { throw "unexpected Grove capabilities: $($c | ConvertTo-Json -Compress -Depth 4)" }
       - name: Run portable full lifecycle
         run: cargo nextest run --locked --no-tests fail --test fleet_lifecycle
+      - name: Run fresh-repository onboarding
+        run: cargo nextest run --locked --no-tests fail --test onboarding
+      - name: Run atomic onboarding
+        run: cargo nextest run --locked --no-tests fail --test init_atomic
       - name: Run complete Unix fleet suite
         if: runner.os != 'Windows'
         run: cargo nextest run --locked --no-tests fail --test fleet
@@ -139,6 +145,8 @@ jobs:
           sh "${installer}"
       - name: Check generated release workflow and qualification gate
         run: |
+          node .github/workflows/patch-release-condition.mjs --test-permissions
+          node .github/workflows/patch-release-condition.mjs --test-qualification
           node .github/workflows/patch-release-condition.mjs
           dist plan
           git diff --exit-code -- dist-workspace.toml .github/workflows/release.yml

@@ -468,6 +468,8 @@ mod tests {
                     usage_marker: None,
                     session_marker: None,
                     resume_argv: Vec::new(),
+                    provenance: None,
+                    resume_provenance: None,
                 },
             );
         }

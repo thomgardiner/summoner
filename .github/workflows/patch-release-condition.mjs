@@ -14,6 +14,7 @@ import { basename, join } from "node:path";
 
 const configPath = "dist-workspace.toml";
 const workflowPath = ".github/workflows/release.yml";
+const qualificationPath = ".github/workflows/release-qualification.yml";
 const distInstaller =
   "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh";
 const distInstallerSha256 =
@@ -22,6 +23,55 @@ const distPowerShellInstaller =
   "irm https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.ps1 | iex";
 const distPowerShellInstallerSha256 =
   "a3435e9944f1a1297add11c6a8ac1f543c14a5ea88879ee05b24ff8218d46d87";
+
+function jobBlock(workflow, name) {
+  const marker = `\n  ${name}:`;
+  const start = workflow.indexOf(marker);
+  if (start < 0) return "";
+  const rest = workflow.slice(start + marker.length);
+  const next = rest.search(/\n  [a-zA-Z0-9_-]+:\n/);
+  return next < 0 ? rest : rest.slice(0, next);
+}
+
+function enforceLeastPrivilege(workflow) {
+  const globalRead = 'name: Release\npermissions:\n  "contents": "read"';
+  if (!workflow.includes(globalRead)) {
+    throw new Error("release workflow must default contents permission to read");
+  }
+  const writes = workflow.split('"contents": "write"').length - 1;
+  const announceBlock = jobBlock(workflow, "announce");
+  const announceWrites = announceBlock.split('"contents": "write"').length - 1;
+  if (writes !== 1 || announceWrites !== 1) {
+    throw new Error("only the announce job may grant contents:write");
+  }
+  const attestBlock = jobBlock(workflow, "attest-release");
+  for (const permission of ['"attestations": "write"', '"id-token": "write"']) {
+    const total = workflow.split(permission).length - 1;
+    const isolated = attestBlock.split(permission).length - 1;
+    if (total !== 1 || isolated !== 1) {
+      throw new Error(`only the attest-release job may grant ${permission}`);
+    }
+  }
+  if (
+    !attestBlock.includes("needs.plan.outputs.publishing == 'true'") ||
+    attestBlock.includes("actions/checkout") ||
+    !attestBlock.includes("uses: actions/attest@")
+  ) {
+    throw new Error("attest-release must be tag-only and must not execute checkout code");
+  }
+}
+
+function enforceQualificationProfiles(workflow) {
+  for (const required of [
+    "continue_on_failure = false",
+    "allow_zero_tests = true",
+  ]) {
+    const matches = workflow.split(required).length - 1;
+    if (matches !== 2) {
+      throw new Error(`expected Unix and Windows Grove smoke profiles to set ${required}`);
+    }
+  }
+}
 
 function releaseFiles(plan) {
   const releases = plan.releases?.filter((release) => release.app_name === "summoner") ?? [];
@@ -115,6 +165,65 @@ if (process.argv[2] === "--test-release-files") {
   process.exit(0);
 }
 
+if (process.argv[2] === "--test-permissions") {
+  const good = `name: Release
+permissions:
+  "contents": "read"
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+  attest-release:
+    if: needs.plan.outputs.publishing == 'true'
+    permissions:
+      "attestations": "write"
+      "contents": "read"
+      "id-token": "write"
+    steps:
+      - uses: actions/attest@pinned
+  announce:
+    permissions:
+      "contents": "write"
+`;
+  enforceLeastPrivilege(good);
+  for (const bad of [
+    good.replace('"contents": "read"', '"contents": "write"'),
+    good.replace(/\n  announce:[\s\S]*/, ""),
+    `${good}  other:\n    permissions:\n      "contents": "write"\n`,
+    good.replace(
+      '    permissions:\n      "contents": "write"',
+      '  later:\n    permissions:\n      "contents": "write"',
+    ),
+    good.replace('  "id-token": "write"', '  "id-token": "read"'),
+    good.replace(
+      '      "id-token": "write"',
+      '      "id-token": "read"\n  later:\n    permissions:\n      "id-token": "write"',
+    ),
+    good.replace("needs.plan.outputs.publishing == 'true'", "always()"),
+    good.replace(
+      '      "id-token": "write"',
+      '      "id-token": "write"\n    steps:\n      - uses: actions/checkout@main',
+    ),
+    good.replace("      - uses: actions/attest@pinned", ""),
+  ]) {
+    assert.throws(() => enforceLeastPrivilege(bad));
+  }
+  console.log("release permission tests passed");
+  process.exit(0);
+}
+
+if (process.argv[2] === "--test-qualification") {
+  const workflow = await readFile(qualificationPath, "utf8");
+  enforceQualificationProfiles(workflow);
+  for (const required of [
+    "continue_on_failure = false",
+    "allow_zero_tests = true",
+  ]) {
+    assert.throws(() => enforceQualificationProfiles(workflow.replace(required, "")));
+  }
+  console.log("release qualification profile tests passed");
+  process.exit(0);
+}
+
 if (process.argv[2] === "--plan") {
   const path = process.argv[3];
   if (!path || process.argv.length !== 4) {
@@ -156,11 +265,47 @@ if (process.argv[2] === "--plan") {
 // the built-in host. Keep the generated workflow fail-closed until dist does.
 const generatedAnnounce = "if: ${{ always() && needs.host.result == 'success' }}";
 const qualifiedAnnounce =
-  "if: ${{ always() && needs.host.result == 'success' && needs.custom-release-qualification.result == 'success' }}";
-const generatedAttestation =
-  "      - name: Attest\n        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6";
-const qualifiedAttestation =
-  "      - name: Attest\n        if: needs.plan.outputs.publishing == 'true'\n        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6";
+  "if: ${{ always() && needs.host.result == 'success' && needs.custom-release-qualification.result == 'success' && needs.attest-release.result == 'success' }}\n    permissions:\n      \"contents\": \"write\"";
+const generatedPermissions = 'permissions:\n  "contents": "write"';
+const qualifiedPermissions = 'permissions:\n  "contents": "read"';
+const generatedBuildPermissions = `    permissions:
+      "attestations": "write"
+      "contents": "read"
+      "id-token": "write"`;
+const qualifiedBuildPermissions = `    permissions:
+      "contents": "read"`;
+const generatedAttestation = `      - name: Attest
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-path: "target/distrib/*\${{ join(matrix.targets, ', ') }}*"`;
+const qualifiedAttestation = "";
+const generatedAnnounceNeeds = "      - custom-release-qualification";
+const qualifiedAnnounceNeeds =
+  "      - custom-release-qualification\n      - attest-release";
+const generatedAnnounceJob = "  # Create a GitHub Release while uploading all files to it\n  announce:";
+const qualifiedAnnounceJob = `  attest-release:
+    needs:
+      - plan
+      - custom-release-qualification
+    if: \${{ needs.plan.outputs.publishing == 'true' && needs.custom-release-qualification.result == 'success' }}
+    permissions:
+      "attestations": "write"
+      "contents": "read"
+      "id-token": "write"
+    runs-on: "ubuntu-22.04"
+    steps:
+      - name: Download qualified release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: qualified-release-files
+          path: release-assets
+      - name: Attest qualified release files
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-path: "release-assets/*"
+
+  # Create a GitHub Release while uploading all files to it
+  announce:`;
 const generatedPlan =
   '          echo "dist ran successfully"\n          cat plan-dist-manifest.json';
 const qualifiedPlan =
@@ -212,8 +357,12 @@ try {
   }
   let qualifiedWorkflow = await readFile(workflowPath, "utf8");
   for (const [label, generated, qualified] of [
+    ["least-privilege workflow permissions", generatedPermissions, qualifiedPermissions],
+    ["unprivileged artifact build", generatedBuildPermissions, qualifiedBuildPermissions],
     ["announce condition", generatedAnnounce, qualifiedAnnounce],
-    ["attestation condition", generatedAttestation, qualifiedAttestation],
+    ["build attestation removal", generatedAttestation, qualifiedAttestation],
+    ["announce attestation dependency", generatedAnnounceNeeds, qualifiedAnnounceNeeds],
+    ["isolated release attestation", generatedAnnounceJob, qualifiedAnnounceJob],
     ["plan installer hardening", generatedPlan, qualifiedPlan],
     ["bootstrap installer hardening", generatedBootstrap, qualifiedBootstrap],
     [
@@ -229,6 +378,7 @@ try {
     }
     qualifiedWorkflow = qualifiedWorkflow.replace(generated, qualified);
   }
+  enforceLeastPrivilege(qualifiedWorkflow);
   await writeFile(workflowPath, qualifiedWorkflow);
   if (qualifiedWorkflow !== checkedWorkflow) {
     throw new Error("checked release workflow differs from pristine generation plus qualification gates");

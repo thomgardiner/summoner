@@ -73,6 +73,12 @@ pub struct ExecutorBackend {
     pub session_marker: Option<String>,
     #[serde(default)]
     pub resume_argv: Vec<String>,
+    /// Immutable launch bindings populated from a run manifest. Config files
+    /// cannot set these fields.
+    #[serde(skip)]
+    pub(crate) provenance: Option<crate::backend_provenance::Provenance>,
+    #[serde(skip)]
+    pub(crate) resume_provenance: Option<crate::backend_provenance::Provenance>,
 }
 
 impl ExecutorBackend {

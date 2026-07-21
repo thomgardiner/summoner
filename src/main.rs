@@ -1,5 +1,6 @@
 //! Model-neutral fleet runner for coding-agent CLIs.
 
+mod backend_provenance;
 mod config;
 mod doctor;
 mod drive;
@@ -54,6 +55,12 @@ enum Cmd {
         prompt_file: PathBuf,
         #[arg(long)]
         stdin: bool,
+        #[arg(long)]
+        expected_path: String,
+        #[arg(long)]
+        expected_sha256: String,
+        #[arg(long)]
+        expected_prompt_sha256: String,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -128,8 +135,18 @@ fn dispatch() -> Result<i32> {
         Cmd::ReviewWorker {
             prompt_file,
             stdin,
+            expected_path,
+            expected_sha256,
+            expected_prompt_sha256,
             command,
-        } => review_worker::run(&prompt_file, stdin, &command),
+        } => review_worker::run(
+            &prompt_file,
+            stdin,
+            &expected_path,
+            &expected_sha256,
+            &expected_prompt_sha256,
+            &command,
+        ),
         Cmd::Init {
             global,
             preset,
@@ -175,21 +192,18 @@ fn initialize(
     example: bool,
     refresh: bool,
 ) -> Result<i32> {
-    let mut report = if global || preset.is_some() {
+    let report = if example {
+        init::onboard(&std::env::current_dir()?, global, preset)?
+    } else if global || preset.is_some() {
         init::global(preset)?
     } else {
-        init::Report::default()
+        init::init(&std::env::current_dir()?, refresh)?
     };
-    if example {
-        report.merge(init::example(&std::env::current_dir()?, false)?);
-    } else if !global && preset.is_none() {
-        report.merge(init::init(&std::env::current_dir()?, refresh)?);
-    }
     let next_steps = if example {
         vec![
             "summoner doctor orders/example.toml",
             "summoner plan orders/example.toml",
-            "summoner run orders/example.toml",
+            "summoner run --stream orders/example.toml",
         ]
     } else {
         vec!["summoner doctor"]

@@ -9,7 +9,10 @@ mod tests;
 use anyhow::{Context, Result};
 pub use global::global;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::grove::GroveCli;
+use crate::presets::PresetName;
 
 const MARKER: &str = "<!-- summoner:agents:v1 -->";
 const END_MARKER: &str = "<!-- summoner:agents:end -->";
@@ -17,6 +20,7 @@ const AGENTS_SECTION: &str = include_str!("../assets/agents-section.md");
 const SKILL: &str = include_str!("../assets/skill.md");
 const STARTER_TOML: &str = include_str!("../assets/summoner-starter.toml");
 const EXAMPLE_ORDER: &str = include_str!("../assets/example-order.toml");
+const GROVE_DEMO: &str = include_str!("../assets/grove-demo.toml");
 
 pub const CHARTER: &str = include_str!("../assets/charter.md");
 pub const REVIEW_CHARTER: &str = include_str!("../assets/review-charter.md");
@@ -42,8 +46,119 @@ pub fn init(workspace: &Path, refresh: bool) -> Result<Report> {
     Ok(report)
 }
 
-pub fn example(workspace: &Path, refresh: bool) -> Result<Report> {
-    let mut report = init(workspace, refresh)?;
+pub(crate) fn onboard(
+    workspace: &Path,
+    write_global: bool,
+    preset: Option<PresetName>,
+) -> Result<Report> {
+    let resolved = crate::config::load()?;
+    let mut snapshot = (write_global || preset.is_some())
+        .then(GlobalSnapshot::capture)
+        .transpose()?;
+    let mut report = if write_global || preset.is_some() {
+        let report = global(preset)?;
+        if let Some(snapshot) = &mut snapshot {
+            snapshot.record_written()?;
+        }
+        report
+    } else {
+        Report::default()
+    };
+    let grove = GroveCli::new(resolved.config.grove_bin());
+    match example(workspace, false, &grove) {
+        Ok(example) => {
+            report.merge(example);
+            Ok(report)
+        }
+        Err(error) => match snapshot {
+            Some(snapshot) => Err(snapshot.rollback(error)),
+            None => Err(error),
+        },
+    }
+}
+
+struct GlobalSnapshot {
+    path: PathBuf,
+    original: Option<Vec<u8>>,
+    written: Option<Vec<u8>>,
+}
+
+impl GlobalSnapshot {
+    fn capture() -> Result<Self> {
+        let path =
+            crate::config::global_path().context("no platform config directory available")?;
+        let original = match std::fs::read(&path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("reading global config snapshot"),
+        };
+        Ok(Self {
+            path,
+            original,
+            written: None,
+        })
+    }
+
+    fn record_written(&mut self) -> Result<()> {
+        self.written = Some(
+            std::fs::read(&self.path).context("reading generated global config for rollback")?,
+        );
+        Ok(())
+    }
+
+    fn rollback(self, cause: anyhow::Error) -> anyhow::Error {
+        self.rollback_with(cause, global::write_atomic)
+    }
+
+    fn rollback_with(
+        self,
+        cause: anyhow::Error,
+        restore: impl FnOnce(&Path, &[u8]) -> Result<()>,
+    ) -> anyhow::Error {
+        match self.restore_if_unchanged(restore) {
+            Ok(()) => cause,
+            Err(error) => cause.context(format!("{error:#}")),
+        }
+    }
+
+    fn restore_if_unchanged(self, restore: impl FnOnce(&Path, &[u8]) -> Result<()>) -> Result<()> {
+        let written = self
+            .written
+            .context("global rollback state was not recorded")?;
+        let current = match std::fs::read(&self.path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("checking global config before rollback"),
+        };
+        if current.as_deref() != Some(written.as_slice()) {
+            anyhow::bail!(
+                "global config {} changed concurrently; preserved its current state — reconcile it manually before retrying",
+                self.path.display()
+            );
+        }
+        match self.original {
+            Some(contents) => restore(&self.path, &contents).context("restoring global config"),
+            None => std::fs::remove_file(self.path).context("removing generated global config"),
+        }
+    }
+}
+
+pub fn example(workspace: &Path, refresh: bool, grove: &GroveCli) -> Result<Report> {
+    let mut report = ensure_demo_profile(workspace)?;
+    if report.written.iter().any(|path| path == ".grove.toml")
+        && !workspace.join("Cargo.lock").is_file()
+    {
+        if let Err(error) = grove.cargo_generate_lockfile(workspace) {
+            std::fs::remove_file(workspace.join(".grove.toml"))?;
+            let lockfile = workspace.join("Cargo.lock");
+            if lockfile.exists() {
+                std::fs::remove_file(lockfile)?;
+            }
+            return Err(error);
+        }
+        report.written.push("Cargo.lock".to_string());
+    }
+    report.merge(init(workspace, refresh)?);
     let path = workspace.join("orders").join("example.toml");
     if path.exists() {
         report.skipped.push("orders/example.toml".to_string());
@@ -57,10 +172,35 @@ pub fn example(workspace: &Path, refresh: bool) -> Result<Report> {
 }
 
 fn example_order(workspace: &Path) -> Result<String> {
-    let Some(profile) = crate::config::grove_profiles(workspace)?.selected else {
-        return Ok(EXAMPLE_ORDER.to_string());
-    };
-    Ok(format!("{EXAMPLE_ORDER}verify_profile = {profile:?}\n"))
+    let profiles = crate::config::grove_profiles(workspace)?;
+    let profile = profiles.selected.context(
+        "the existing .grove.toml has no single required usable verification profile; select exactly one required profile before creating the example",
+    )?;
+    let value = EXAMPLE_ORDER.replace(
+        "verify_profile = \"rust-check\"",
+        &format!("verify_profile = {profile:?}"),
+    );
+    Ok(value)
+}
+
+fn ensure_demo_profile(workspace: &Path) -> Result<Report> {
+    let mut report = Report::default();
+    let profiles = crate::config::grove_profiles(workspace)?;
+    if profiles.path.is_some() {
+        if profiles.selected.is_none() {
+            anyhow::bail!(
+                "the existing .grove.toml has no single required usable verification profile; configure exactly one required profile before creating the example"
+            );
+        }
+        report.skipped.push(".grove.toml".to_string());
+        return Ok(report);
+    }
+    if !workspace.join("Cargo.toml").is_file() {
+        anyhow::bail!("the example requires a Rust workspace with Cargo.toml")
+    }
+    std::fs::write(workspace.join(".grove.toml"), GROVE_DEMO).context("writing .grove.toml")?;
+    report.written.push(".grove.toml".to_string());
+    Ok(report)
 }
 
 fn write_repo_config(workspace: &Path, report: &mut Report) -> Result<()> {
