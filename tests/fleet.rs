@@ -21,7 +21,7 @@ fn require_grove() {
     let output = Command::new(grove_bin())
         .arg("--version")
         .output()
-        .expect("Grove 0.3.3 must be installed or SUMMONER_TEST_GROVE must name it");
+        .expect("Grove 0.3.4 must be installed or SUMMONER_TEST_GROVE must name it");
     assert!(
         output.status.success(),
         "Grove --version failed: {}",
@@ -29,7 +29,7 @@ fn require_grove() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
-        "grove 0.3.3",
+        "grove 0.3.4",
         "fleet tests require the exact qualified Grove release"
     );
     let output = Command::new(grove_bin())

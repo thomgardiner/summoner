@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const VERSION: &str = "0.3.3";
+const VERSION: &str = "0.3.4";
 
 #[derive(Deserialize)]
 struct Report {
@@ -62,7 +62,7 @@ pub(super) fn check(cli: &GroveCli) -> Result<Capabilities> {
             "windows_job_object" | "unix_process_group_best_effort"
         );
     if !exact {
-        bail!("Grove capabilities do not match the release-qualified 0.3.3 inspection contract")
+        bail!("Grove capabilities do not match the release-qualified 0.3.4 inspection contract")
     }
     Ok(Capabilities {
         version: report.grove_version,
