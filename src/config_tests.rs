@@ -29,6 +29,7 @@ fn merged_config() -> Config {
         Profile {
             default_executor: Some("codex".into()),
             default_reviewer: Some("codex-review".into()),
+            detect_env: None,
         },
     );
 
@@ -45,6 +46,7 @@ fn merged_config() -> Config {
         Profile {
             default_executor: None,
             default_reviewer: Some("glm-review".into()),
+            detect_env: None,
         },
     );
     merge(&mut base, over);
@@ -260,4 +262,40 @@ fn defaults_apply_when_nothing_is_configured() {
     assert_eq!(cfg.grove_bin(), "grove");
     assert!(!cfg.keep_failed_worktrees());
     assert_eq!(cfg.default_executor(), None);
+}
+
+/// Any harness that exports an identifying variable can self-register a
+/// profile in config, with no vendor list compiled into summoner. Ambiguous
+/// matches select nothing rather than guessing.
+#[test]
+fn detect_env_selects_a_profile_for_any_harness_and_refuses_ambiguity() {
+    let mut config = Config::default();
+    config.profiles.insert(
+        "gemini".into(),
+        Profile {
+            default_executor: Some("gemini-exec".into()),
+            default_reviewer: None,
+            detect_env: Some("SUMMONER_TEST_GEMINI_MARKER".into()),
+        },
+    );
+    unsafe { std::env::remove_var("SUMMONER_PROFILE") };
+    unsafe { std::env::set_var("SUMMONER_TEST_GEMINI_MARKER", "1") };
+    let selected = load::select_profile(&mut config, None).unwrap();
+    assert_eq!(selected.as_deref(), Some("gemini"));
+    assert_eq!(config.default_executor.as_deref(), Some("gemini-exec"));
+
+    // A second matching profile makes detection ambiguous: none selected.
+    config.profiles.insert(
+        "other".into(),
+        Profile {
+            default_executor: None,
+            default_reviewer: None,
+            detect_env: Some("SUMMONER_TEST_GEMINI_MARKER".into()),
+        },
+    );
+    let mut fresh = config.clone();
+    fresh.default_executor = None;
+    let selected = load::select_profile(&mut fresh, None).unwrap();
+    assert_eq!(selected, None);
+    unsafe { std::env::remove_var("SUMMONER_TEST_GEMINI_MARKER") };
 }

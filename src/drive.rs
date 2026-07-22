@@ -403,15 +403,24 @@ impl<'a> OrderRun<'a> {
     /// known; a captured session id must be id-shaped or it is ignored.
     fn scrape_output(&self, report: &mut OrderReport, prefix: &str) {
         let logs = [format!("{prefix}stderr.log"), format!("{prefix}stdout.log")];
-        if let Some(marker) = &self.backend.usage_marker
-            && let Some(used) = logs.iter().find_map(|name| {
+        if let Some(marker) = &self.backend.usage_marker {
+            match logs.iter().find_map(|name| {
                 executor::tail(&self.order_dir.join(name), 8192)
                     .as_deref()
                     .and_then(|text| number_after(text, marker))
-            })
-        {
-            report.usage_tokens = Some(report.usage_tokens.unwrap_or(0).saturating_add(used));
-            self.ctx.spent.fetch_add(used, Ordering::SeqCst);
+            }) {
+                Some(used) => {
+                    report.usage_tokens =
+                        Some(report.usage_tokens.unwrap_or(0).saturating_add(used));
+                    self.ctx.spent.fetch_add(used, Ordering::SeqCst);
+                }
+                // A marker that never matches is a silent hole in budget
+                // tracking (a vendor CLI whose banner changed, or one that
+                // emits JSON): say so instead of reporting nothing at all.
+                None => report.tripwires.push(format!(
+                    "usage_marker {marker:?} never matched this attempt's output;                      token usage was not tracked"
+                )),
+            }
         }
         if let Some(marker) = &self.backend.session_marker
             && let Some(session) = logs.iter().find_map(|name| {

@@ -23,6 +23,17 @@ pinned verification policy).
 
 ### Added
 
+- Profiles self-register through `detect_env`: any harness that exports an
+  identifying environment variable selects its profile automatically, with no
+  vendor list compiled into summoner. Ambiguous matches select nothing.
+- A review verdict wrapped in one markdown fence parses; several chat-first
+  CLIs fence JSON regardless of instruction, and the fence carries no
+  authority. Anything else around the object still fails closed.
+- A configured `usage_marker` that never matches an attempt's output is now
+  reported instead of silently tracking nothing.
+- The Claude Code skill file is written only where Claude Code is already in
+  evidence (`.claude/` or `CLAUDE.md` present), so onboarding other harnesses
+  leaves no vendor residue.
 - Optional `[trusted_policy]` in the operator's global config: required
   reviewer, reviewer distinct from executor by name, allowed executors,
   reviewers, and profiles, protected paths, and whether unverified `completed`

@@ -35,18 +35,45 @@ fn failed_atomic_rollback_preserves_written_config_and_grove_error() {
 fn init_writes_once_and_skips_twice() {
     let dir = tempfile::tempdir().unwrap();
     let first = init(dir.path(), false).unwrap();
-    assert_eq!(
-        first.written,
-        [
-            ".summoner.toml",
-            "AGENTS.md",
-            ".claude/skills/summoner/SKILL.md"
-        ]
+    // No Claude Code in evidence, so no vendor furniture: the skill file is
+    // skipped, and AGENTS.md carries the whole contract.
+    assert_eq!(first.written, [".summoner.toml", "AGENTS.md"]);
+    assert_eq!(first.skipped.len(), 1, "{:?}", first.skipped);
+    assert!(
+        first.skipped[0].contains("no Claude Code"),
+        "{:?}",
+        first.skipped
     );
-    assert!(first.skipped.is_empty());
     let second = init(dir.path(), false).unwrap();
     assert!(second.written.is_empty());
     assert_eq!(second.skipped.len(), 3);
+}
+
+/// The skill is Claude Code furniture: written only where that harness is
+/// already in evidence, never dropped into repositories driven by others.
+#[test]
+fn the_claude_skill_is_written_only_where_claude_is_present() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+    let report = init(dir.path(), false).unwrap();
+    assert!(
+        report
+            .written
+            .iter()
+            .any(|entry| entry.contains("SKILL.md")),
+        "{report:?}"
+    );
+
+    let bare = tempfile::tempdir().unwrap();
+    let report = init(bare.path(), false).unwrap();
+    assert!(
+        !report
+            .written
+            .iter()
+            .any(|entry| entry.contains("SKILL.md")),
+        "{report:?}"
+    );
+    assert!(!bare.path().join(".claude").exists());
 }
 
 #[test]

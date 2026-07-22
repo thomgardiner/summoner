@@ -101,6 +101,12 @@ impl TrustedPolicy {
 pub struct Profile {
     pub default_executor: Option<String>,
     pub default_reviewer: Option<String>,
+    /// Environment variable whose presence selects this profile automatically,
+    /// so any harness that exports an identifying variable can self-register
+    /// without a code change. The built-in Claude Code and Codex detection
+    /// keeps working for profiles that leave this unset.
+    #[serde(default)]
+    pub detect_env: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -316,6 +322,7 @@ fn merge(base: &mut Config, over: Config) {
                 existing.default_reviewer = profile
                     .default_reviewer
                     .or(existing.default_reviewer.take());
+                existing.detect_env = profile.detect_env.or(existing.detect_env.take());
             }
             std::collections::btree_map::Entry::Vacant(slot) => {
                 slot.insert(profile);

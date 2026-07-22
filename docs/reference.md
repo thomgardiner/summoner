@@ -6,6 +6,12 @@
 identity, verification profiles, executor binaries, model CLI health. Malformed
 config is an error, never a fallback.
 
+Orchestrator profiles select themselves through config, not a compiled vendor
+list: a profile with `detect_env = "SOME_VAR"` is chosen automatically when
+that variable is present, so any harness that exports an identifying variable
+self-registers. Ambiguous matches select nothing and say so. The built-in
+Claude Code and Codex detection still applies to profiles without `detect_env`.
+
 Auth checks are noninteractive, capped at 5s. Kimi has no reliable auth probe,
 so its preset records an acknowledgement. Unknown-auth custom backends fail
 closed until named in `allow_unknown_auth` or run with `--allow-unknown-auth`.
@@ -88,7 +94,10 @@ origin, no shared git metadata, no build lane. Its prompt: charter,
 requirements, verification evidence, candidate diff, nonce, snapshot digests.
 Never the executor's transcript.
 
-The verdict is one strict JSON object binding the nonce and digests. Anything off voids approval: unknown fields, replayed bindings, source or
+The verdict is one strict JSON object binding the nonce and digests. A markdown
+fence wrapping the whole payload is stripped before parsing, because several
+chat-first CLIs fence JSON regardless of instruction; the fence carries no
+authority, and anything else around the object still fails closed. Anything off voids approval: unknown fields, replayed bindings, source or
 capsule drift, surviving processes, truncated logs. Approve: `verified` → `approved`.
 Reject: `rejected` with findings.
 

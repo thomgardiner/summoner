@@ -242,6 +242,20 @@ fn write_agents(workspace: &Path, refresh: bool, report: &mut Report) -> Result<
 }
 
 fn write_skill(workspace: &Path, refresh: bool, report: &mut Report) -> Result<()> {
+    // The skill file is Claude Code furniture. Writing it unconditionally put
+    // a `.claude/` directory into every repository regardless of which harness
+    // the user actually runs, which is exactly the vendor-specific residue a
+    // neutral tool must not leave. It is written only where Claude Code is
+    // already in evidence; every other harness reads the same contract from
+    // AGENTS.md.
+    let claude_present =
+        workspace.join(".claude").is_dir() || workspace.join("CLAUDE.md").is_file();
+    if !claude_present {
+        report
+            .skipped
+            .push(".claude/skills/summoner/SKILL.md (no Claude Code in this repo)".to_string());
+        return Ok(());
+    }
     let dir = workspace.join(".claude").join("skills").join("summoner");
     let path = dir.join("SKILL.md");
     let stale = refresh

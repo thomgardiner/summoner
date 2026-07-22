@@ -157,6 +157,30 @@ fn explicit_profile(config: &Config, name: String) -> anyhow::Result<String> {
 
 fn detected_profile(config: &Config) -> Option<String> {
     let has = |variable: &str| std::env::var_os(variable).is_some();
+    // Config-declared detection first: any harness that exports an identifying
+    // variable selects its profile without summoner knowing the vendor.
+    // BTreeMap order makes ambiguity deterministic to report.
+    let declared: Vec<&String> = config
+        .profiles
+        .iter()
+        .filter(|(_, profile)| profile.detect_env.as_deref().is_some_and(has))
+        .map(|(name, _)| name)
+        .collect();
+    match declared.as_slice() {
+        [] => {}
+        [only] => return Some((*only).clone()),
+        many => {
+            eprintln!(
+                "summoner: multiple profiles match their detect_env ({}); \
+                 pass --profile, set SUMMONER_PROFILE, or pin profile = \"<name>\"",
+                many.iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return None;
+        }
+    }
     if has("CLAUDECODE") && has("CODEX_SANDBOX") && !config.profiles.is_empty() {
         eprintln!(
             "summoner: both CLAUDECODE and CODEX_SANDBOX are set (nested harnesses); \

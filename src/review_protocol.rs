@@ -42,6 +42,29 @@ impl Binding {
     }
 }
 
+/// Strip one markdown fence wrapping the whole payload, when present. Several
+/// chat-first CLIs fence any JSON they emit regardless of instructions; the
+/// binding checks below are the security boundary, and a fence carries no
+/// authority either way. Only a complete wrap is stripped: fences elsewhere in
+/// the payload still fail parsing, exactly as before.
+fn unfence(output: &[u8]) -> &[u8] {
+    let text = match std::str::from_utf8(output) {
+        Ok(text) => text.trim(),
+        Err(_) => return output,
+    };
+    let Some(rest) = text.strip_prefix("```") else {
+        return output;
+    };
+    let Some(inner) = rest.strip_suffix("```") else {
+        return output;
+    };
+    // The opener may carry a language tag ("```json"); drop that first line.
+    match inner.split_once('\n') {
+        Some((_tag, body)) => body.trim().as_bytes(),
+        None => output,
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Envelope {
@@ -89,8 +112,8 @@ pub fn parse(output: &[u8], expected: &Binding) -> Result<Envelope> {
     if output.len() > MAX_OUTPUT {
         bail!("review verdict exceeds {MAX_OUTPUT} bytes")
     }
-    let envelope: Envelope =
-        serde_json::from_slice(output).context("review stdout is not one strict JSON object")?;
+    let envelope: Envelope = serde_json::from_slice(unfence(output))
+        .context("review stdout is not one strict JSON object")?;
     if envelope.protocol_version != VERSION {
         bail!("unsupported review protocol version")
     }
@@ -164,5 +187,23 @@ mod tests {
                 "{field}"
             );
         }
+    }
+
+    /// Chat-first CLIs fence JSON regardless of instructions; a fence around
+    /// the whole payload is stripped, while everything the fence could hide
+    /// behind (prose, injected fields, wrong bindings) still fails closed.
+    #[test]
+    fn a_fenced_verdict_parses_and_partial_fences_still_fail() {
+        let fenced = format!("```json\n{}\n```", valid());
+        assert!(parse(fenced.as_bytes(), &binding()).is_ok());
+        let bare_fence = format!("```\n{}\n```", valid());
+        assert!(parse(bare_fence.as_bytes(), &binding()).is_ok());
+
+        // Prose before a fence is not a clean wrap: refused, as before.
+        let noisy = format!("Here is my verdict:\n```json\n{}\n```", valid());
+        assert!(parse(noisy.as_bytes(), &binding()).is_err());
+        // A fence with trailing prose is not a clean wrap either.
+        let trailing = format!("```json\n{}\n``` done", valid());
+        assert!(parse(trailing.as_bytes(), &binding()).is_err());
     }
 }

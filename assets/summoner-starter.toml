@@ -56,10 +56,13 @@
 # Selection: --profile <name> > SUMMONER_PROFILE > a config `profile` pin.
 # Harness markers optionally select profiles named "claude" or "codex" only
 # when those profiles exist; both markers at once leave selection explicit.
+# Any other harness self-registers with detect_env: the profile is selected
+# automatically when that environment variable is present.
 #
 # [profiles.interactive]
 # default_executor = "mytool"
 # default_reviewer = "reviewtool"
+# detect_env = "MYHARNESS_SESSION"
 # [profiles.automation]
 # default_executor = "batchtool"
 # default_reviewer = "audittool"

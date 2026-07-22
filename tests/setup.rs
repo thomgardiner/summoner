@@ -144,9 +144,14 @@ fn one_command_onboarding_is_idempotent() {
         fixture.repo.join(".summoner.toml"),
         fixture.repo.join(".grove.toml"),
         fixture.repo.join("AGENTS.md"),
-        fixture.repo.join(".claude/skills/summoner/SKILL.md"),
         fixture.repo.join("orders/example.toml"),
     ];
+    // A codex onboarding leaves no Claude furniture behind: the skill file is
+    // written only where Claude Code is already in evidence.
+    assert!(
+        !fixture.repo.join(".claude").exists(),
+        "no .claude/ residue for a codex preset"
+    );
     let before: Vec<_> = paths
         .iter()
         .map(|path| std::fs::read(path).unwrap())
@@ -155,7 +160,8 @@ fn one_command_onboarding_is_idempotent() {
     success(output.clone());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["written"], serde_json::json!([]));
-    assert_eq!(report["skipped"].as_array().unwrap().len(), paths.len());
+    // Every managed path skips, plus the skill notice explaining its absence.
+    assert_eq!(report["skipped"].as_array().unwrap().len(), paths.len() + 1);
     for (path, expected) in paths.iter().zip(before) {
         assert_eq!(std::fs::read(path).unwrap(), expected);
     }
