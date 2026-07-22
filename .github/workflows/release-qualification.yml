@@ -57,28 +57,7 @@ jobs:
       - name: Verify and install macOS release artifact
         shell: bash
         run: |
-          set -euo pipefail
-          archive="summoner-${{ matrix.target }}.tar.xz"
-          for path in artifacts/summoner-installer.sh artifacts/sha256.sum "artifacts/${archive}" "artifacts/${archive}.sha256"; do
-            test -s "${path}"
-          done
-          (cd artifacts && shasum -a 256 -c sha256.sum)
-          (cd artifacts && shasum -a 256 -c "${archive}.sha256")
-          python3 -m http.server 8765 --bind 127.0.0.1 --directory artifacts >"${RUNNER_TEMP}/summoner-http.log" 2>&1 &
-          server=$!
-          trap 'kill "${server}"' EXIT
-          for _ in {1..20}; do
-            curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null && break
-            sleep 0.25
-          done
-          curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null
-          install_root="${RUNNER_TEMP}/summoner release"
-          SUMMONER_DOWNLOAD_URL="http://127.0.0.1:8765" \
-          CARGO_DIST_FORCE_INSTALL_DIR="${install_root}" \
-          SUMMONER_NO_MODIFY_PATH=1 \
-            sh artifacts/summoner-installer.sh
-          expected=$(jq -er '[.releases[] | select(.app_name == "summoner") | .app_version] | if length == 1 then .[0] else error("expected one Summoner release") end' <<<"${PLAN}")
-          test "$("${install_root}/bin/summoner" --version)" = "summoner ${expected}"
+          bash scripts/qualify/install-check.sh "${{ matrix.target }}" artifacts "${RUNNER_TEMP}/summoner release 雪"
 
   shell-installer:
     runs-on: ubuntu-22.04
@@ -96,30 +75,8 @@ jobs:
       - name: Verify and install release artifacts
         shell: bash
         run: |
-          set -euo pipefail
-          archive=summoner-x86_64-unknown-linux-musl.tar.xz
-          test -s artifacts/summoner-installer.sh
-          test -s artifacts/sha256.sum
-          test -s "artifacts/${archive}"
-          test -s "artifacts/${archive}.sha256"
-          (cd artifacts && shasum -a 256 -c sha256.sum)
-          (cd artifacts && shasum -a 256 -c "${archive}.sha256")
-          python3 -m http.server 8765 --bind 127.0.0.1 --directory artifacts >"${RUNNER_TEMP}/summoner-http.log" 2>&1 &
-          server=$!
-          trap 'kill "${server}"' EXIT
-          for _ in {1..20}; do
-            curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null && break
-            sleep 0.25
-          done
-          curl -fIsS http://127.0.0.1:8765/summoner-installer.sh >/dev/null
-          install_root="${RUNNER_TEMP}/summoner release"
-          SUMMONER_DOWNLOAD_URL="http://127.0.0.1:8765" \
-          CARGO_DIST_FORCE_INSTALL_DIR="${install_root}" \
-          SUMMONER_NO_MODIFY_PATH=1 \
-            sh artifacts/summoner-installer.sh
-          expected=$(jq -er '[.releases[] | select(.app_name == "summoner") | .app_version] | if length == 1 then .[0] else error("expected one Summoner release") end' <<<"${PLAN}")
-          test "$("${install_root}/bin/summoner" --version)" = "summoner ${expected}"
-          echo "SUMMONER_BIN=${install_root}/bin/summoner" >> "${GITHUB_ENV}"
+          bash scripts/qualify/install-check.sh x86_64-unknown-linux-musl artifacts "${RUNNER_TEMP}/summoner release 雪"
+          echo "SUMMONER_BIN=${RUNNER_TEMP}/summoner release 雪/bin/summoner" >> "${GITHUB_ENV}"
       - name: Install exact Grove 0.3.4
         shell: bash
         env:
@@ -137,66 +94,7 @@ jobs:
       - name: Run installed reviewed fleet smoke
         shell: bash
         run: |
-          set -euo pipefail
-          smoke="${RUNNER_TEMP}/summoner fleet ü"
-          mkdir -p "${smoke}/fake-bin"
-          cat >"${smoke}/fake-bin/codex" <<'EOF'
-          #!/bin/sh
-          set -eu
-          if [ "${1:-}" = login ]; then exit 0; fi
-          prompt=$(mktemp)
-          trap 'rm -f "$prompt"' EXIT
-          cat >"$prompt"
-          if [ -f docs/summoner-demo.md ]; then
-            python3 - "$prompt" <<'PY'
-          import json
-          import sys
-
-          templates = []
-          for line in open(sys.argv[1], encoding="utf-8"):
-              try:
-                  value = json.loads(line)
-              except json.JSONDecodeError:
-                  continue
-              if value.get("protocol_version") == 1:
-                  templates.append(value)
-          if len(templates) != 1:
-              raise SystemExit(f"expected one review protocol template, found {len(templates)}")
-          verdict = templates[0]
-          verdict["verdict"] = "approve"
-          verdict["findings"] = []
-          verdict["reviewer"]["model"] = "fake"
-          print(json.dumps(verdict, separators=(",", ":")))
-          PY
-            exit 0
-          fi
-          mkdir -p docs
-          printf '%s\n' '# Summoner demo' '' 'This repository builds the Summoner fleet runner.' > docs/summoner-demo.md
-          git add docs/summoner-demo.md
-          git commit -qm 'demo executor'
-          printf '%s\n' '{"summoner_status":"complete","unmet":[]}'
-          EOF
-          chmod +x "${smoke}/fake-bin/codex"
-          cd "${smoke}"
-          git init -q
-          git config user.name release-smoke
-          git config user.email release-smoke@example.com
-          printf '%s\n' '[verification]' 'required = ["fast"]' '[verification.profiles.fast]' 'continue_on_failure = false' 'commands = [{ argv = ["git", "diff", "--check"], allow_zero_tests = true }]' > .grove.toml
-          export XDG_CONFIG_HOME="${smoke}/config"
-          export PATH="${smoke}/fake-bin:${RUNNER_TEMP}/grove/bin:${PATH}"
-          "${SUMMONER_BIN}" init --preset codex --example
-          git add -A
-          git commit -qm 'initialize smoke repository'
-          "${SUMMONER_BIN}" doctor orders/example.toml
-          "${SUMMONER_BIN}" plan orders/example.toml
-          "${SUMMONER_BIN}" run --stream orders/example.toml > events.jsonl
-          jq -s -e '
-            (map(.event) | index("run_started") != null and index("order_started") != null) and
-            (last.event == "report") and
-            (last.report.summary.approved == 1) and
-            ((last.report.summary.error // 0) == 0) and
-            ((last.report.summary.rejected // 0) == 0)
-          ' events.jsonl
+          bash scripts/qualify/fleet-smoke.sh "${RUNNER_TEMP}"
 
   powershell-installer:
     runs-on: windows-2022
