@@ -15,6 +15,14 @@ host=$(rustc -vV | sed -n 's/^host: //p')
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/summoner-qualify-XXXXXX")
 trap 'rm -rf "${scratch}"' EXIT
 
+echo "==> repo quality gates (fmt, clippy, distribution checks)"
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+node .github/workflows/patch-release-condition.mjs --test-permissions
+node .github/workflows/patch-release-condition.mjs --test-qualification
+node .github/workflows/patch-release-condition.mjs
+git diff --exit-code -- dist-workspace.toml .github/workflows/release.yml
+
 echo "==> dist build (${host})"
 dist build --artifacts local --target "${host}" >/dev/null
 dist build --artifacts global >/dev/null 2>&1 || true

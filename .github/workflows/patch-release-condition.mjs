@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import {
   copyFile,
@@ -62,13 +63,20 @@ function enforceLeastPrivilege(workflow) {
 }
 
 function enforceQualificationProfiles(workflow) {
+  // The Unix smoke lives in the shared script (also run locally by
+  // scripts/qualify-local.sh); the Windows smoke is inline in the workflow.
+  const unixSmoke = readFileSync("scripts/qualify/fleet-smoke.sh", "utf8");
   for (const required of [
     "continue_on_failure = false",
     "allow_zero_tests = true",
   ]) {
-    const matches = workflow.split(required).length - 1;
-    if (matches !== 2) {
-      throw new Error(`expected Unix and Windows Grove smoke profiles to set ${required}`);
+    for (const [name, text] of [
+      ["Unix (scripts/qualify/fleet-smoke.sh)", unixSmoke],
+      ["Windows (release-qualification.yml)", workflow],
+    ]) {
+      if (!text.includes(required)) {
+        throw new Error(`expected the ${name} Grove smoke profile to set ${required}`);
+      }
     }
   }
 }
