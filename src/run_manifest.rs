@@ -32,6 +32,12 @@ pub(crate) struct Settings {
     pub(crate) fail_fast: Option<usize>,
     pub(crate) revise: usize,
     pub(crate) run_token_budget: Option<u64>,
+    /// The trusted policy in force, recorded verbatim with its content
+    /// address: a resumed run is gated by the same bar the original ran under.
+    #[serde(default)]
+    pub(crate) trusted_policy: Option<crate::config::TrustedPolicy>,
+    #[serde(default)]
+    pub(crate) trusted_policy_sha256: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -163,8 +169,22 @@ pub(crate) fn bound_config(manifest: &Manifest, current: &Config) -> Result<Conf
         revise: Some(manifest.settings.revise),
         run_token_budget: manifest.settings.run_token_budget,
         allow_unknown_auth: current.allow_unknown_auth.clone(),
+        // The recorded policy, not today's config: a resume is gated by the bar
+        // the run started under, and its digest must still match.
+        trusted_policy: manifest.settings.trusted_policy.clone(),
         ..Config::default()
     };
+    if let Some(policy) = config.trusted_policy.as_ref() {
+        let recorded = manifest
+            .settings
+            .trusted_policy_sha256
+            .as_deref()
+            .context("run manifest records a trusted policy without its digest")?;
+        let actual = policy.sha256();
+        if actual != recorded {
+            bail!("recorded trusted policy does not match its digest: {recorded} vs {actual}");
+        }
+    }
     config.executors = manifest
         .backends
         .iter()

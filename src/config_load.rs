@@ -200,6 +200,15 @@ pub(super) fn load_from(cwd: &Path) -> Result<Resolved> {
                 path.display()
             );
         }
+        // The acceptance bar belongs to the orchestrator, not to the repository
+        // being worked on: a candidate that could publish its own policy could
+        // weaken or erase the one gating it.
+        if repo.trusted_policy.is_some() {
+            anyhow::bail!(
+                "{} cannot set trusted_policy; the acceptance bar belongs to the operator's global config",
+                path.display()
+            );
+        }
         merge(&mut config, repo);
         sources.push(path.display().to_string());
     }

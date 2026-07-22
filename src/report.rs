@@ -75,6 +75,10 @@ pub struct RunReport {
     /// Sum of per-order token usage, present when any executor reported one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_tokens: Option<u64>,
+    /// Content address of the trusted policy that gated this run, when one was
+    /// declared: the report states which bar its outcomes were judged against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trusted_policy_sha256: Option<String>,
     pub orders: Vec<OrderReport>,
 }
 
@@ -86,6 +90,7 @@ impl RunReport {
         started_at: u64,
         duration_secs: u64,
         mut orders: Vec<OrderReport>,
+        trusted_policy_sha256: Option<String>,
     ) -> Self {
         orders.sort_by(|a, b| a.outcome.cmp(&b.outcome).then(a.id.cmp(&b.id)));
         let mut summary = BTreeMap::new();
@@ -104,6 +109,7 @@ impl RunReport {
             duration_secs,
             summary,
             usage_tokens,
+            trusted_policy_sha256,
             orders,
         }
     }
@@ -140,6 +146,12 @@ pub struct OrderReport {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+    /// The candidate's exact commit, captured in the worktree before release.
+    /// Release may salvage dirty state into a new commit and advance the
+    /// branch, so the branch name alone does not identify what was reviewed;
+    /// this does, and it is what any later accept step must integrate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_commit: Option<String>,
     /// How many executor attempts this order took (1 = no revisions).
     pub attempts: u64,
     /// The executor's own session identifier, when a `session_marker`
@@ -202,6 +214,7 @@ impl OrderReport {
             worktree: None,
             branch: None,
             base_commit: None,
+            candidate_commit: None,
             attempts: 1,
             session_id: None,
             commits: 0,
@@ -348,6 +361,7 @@ mod tests {
                 report_with("clash", Outcome::Blocked),
                 report_with("meh", Outcome::Completed),
             ],
+            None,
         );
         let ids: Vec<&str> = report.orders.iter().map(|o| o.id.as_str()).collect();
         assert_eq!(ids, ["clash", "late", "meh", "done"]);
@@ -361,6 +375,7 @@ mod tests {
             0,
             1,
             vec![report_with("a", Outcome::Verified)],
+            None,
         );
         assert_eq!(green.exit_code(), 0);
     }

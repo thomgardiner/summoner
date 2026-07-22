@@ -60,6 +60,11 @@ pub(crate) fn run(
             .context("collecting review status from inspection capsule")?;
         let diff_sha256 = review::sha256(diff.as_bytes());
         let binding = Binding::new(acquired.source_sha256.clone(), diff_sha256, reviewer)?;
+        let policy_sha256 = ctx
+            .config
+            .trusted_policy
+            .as_ref()
+            .map(|policy| policy.sha256());
         let evidence = Evidence {
             base,
             diff: &diff,
@@ -67,6 +72,7 @@ pub(crate) fn run(
             uncommitted: &status,
             tripwires: &report.tripwires,
             verify: &report.verify,
+            trusted_policy_sha256: policy_sha256.as_deref(),
         };
         let prompt = review::compose_prompt(order, &evidence, &binding.instructions());
         let review_prefix = format!("{prefix}review-");

@@ -48,11 +48,11 @@ jobs:
         with:
           tool: nextest@0.9.140
           fallback: none
-      - name: Install exact Grove 0.3.4 artifact (Unix)
+      - name: Install exact Grove 0.3.5 artifact (Unix)
         if: runner.os != 'Windows'
         shell: bash
         env:
-          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.4
+          GROVE_RELEASE: https://github.com/thomgardiner/grove/releases/download/v0.3.5
         run: |
           set -euo pipefail
           case "$(uname -s)-$(uname -m)" in
@@ -69,11 +69,11 @@ jobs:
           tar -xJf "${archive}" -C "${RUNNER_TEMP}/grove/bin" --strip-components 1
           echo "${RUNNER_TEMP}/grove/bin" >> "${GITHUB_PATH}"
           echo "SUMMONER_TEST_GROVE=${RUNNER_TEMP}/grove/bin/grove" >> "${GITHUB_ENV}"
-      - name: Install exact Grove 0.3.4 artifact (Windows)
+      - name: Install exact Grove 0.3.5 artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $release = "https://github.com/thomgardiner/grove/releases/download/v0.3.4"
+          $release = "https://github.com/thomgardiner/grove/releases/download/v0.3.5"
           $archive = "grove-x86_64-pc-windows-msvc.zip"
           Invoke-WebRequest "$release/$archive" -OutFile $archive
           Invoke-WebRequest "$release/$archive.sha256" -OutFile "$archive.sha256"
@@ -90,13 +90,14 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          test "$("$SUMMONER_TEST_GROVE" --version)" = "grove 0.3.4"
+          test "$("$SUMMONER_TEST_GROVE" --version)" = "grove 0.3.5"
           "$SUMMONER_TEST_GROVE" capabilities > grove-capabilities.json
           node -e '
             const c = require("./grove-capabilities.json");
             if (
-              c.schema_version !== 1 || c.grove_version !== "0.3.4" ||
-              c.status.repository_schema !== 1 || c.status.task_status_schema !== 3 || c.status.task_record_schema !== 5 ||
+              c.schema_version !== 1 || c.grove_version !== "0.3.5" ||
+              c.status.repository_schema !== 1 || c.status.task_status_schema !== 3 || c.status.task_record_schema !== 6 ||
+              !c.task.exec_capabilities.includes("edit") || c.task.verification_policy_pinned !== true ||
               c.inspection.binding_schema !== 1 || c.inspection.execution_schema !== 1 ||
               c.inspection.finish_source_cas !== true ||
               c.inspection.process_tree !== "unix_process_group_best_effort" ||
@@ -109,11 +110,12 @@ jobs:
         shell: pwsh
         run: |
           $version = & $env:SUMMONER_TEST_GROVE --version
-          if ($version -ne "grove 0.3.4") { throw "unexpected Grove version: $version" }
+          if ($version -ne "grove 0.3.5") { throw "unexpected Grove version: $version" }
           $c = & $env:SUMMONER_TEST_GROVE capabilities | ConvertFrom-Json
           if (
-            $c.schema_version -ne 1 -or $c.grove_version -ne '0.3.4' -or
-            $c.status.repository_schema -ne 1 -or $c.status.task_status_schema -ne 3 -or $c.status.task_record_schema -ne 5 -or
+            $c.schema_version -ne 1 -or $c.grove_version -ne '0.3.5' -or
+            $c.status.repository_schema -ne 1 -or $c.status.task_status_schema -ne 3 -or $c.status.task_record_schema -ne 6 -or
+            -not ($c.task.exec_capabilities -contains 'edit') -or $c.task.verification_policy_pinned -ne $true -or
             $c.inspection.binding_schema -ne 1 -or $c.inspection.execution_schema -ne 1 -or
             $c.inspection.finish_source_cas -ne $true -or
             $c.inspection.process_tree -ne 'windows_job_object' -or

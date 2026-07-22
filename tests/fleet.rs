@@ -21,7 +21,7 @@ fn require_grove() {
     let output = Command::new(grove_bin())
         .arg("--version")
         .output()
-        .expect("Grove 0.3.4 must be installed or SUMMONER_TEST_GROVE must name it");
+        .expect("Grove 0.3.5 must be installed or SUMMONER_TEST_GROVE must name it");
     assert!(
         output.status.success(),
         "Grove --version failed: {}",
@@ -29,7 +29,7 @@ fn require_grove() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
-        "grove 0.3.4",
+        "grove 0.3.5",
         "fleet tests require the exact qualified Grove release"
     );
     let output = Command::new(grove_bin())
@@ -333,6 +333,27 @@ fn happy_path_order_is_verified_released_and_salvaged_to_its_branch() {
     assert_eq!(entry["commits"], 1);
     assert_eq!(entry["finish"]["verified"], true);
     assert_eq!(report["summary"]["verified"], 1);
+
+    // The reviewed candidate is identified by an immutable commit captured
+    // before release, not just by a branch name that release can advance.
+    let candidate = entry["candidate_commit"]
+        .as_str()
+        .expect("candidate commit recorded before release");
+    assert_eq!(
+        candidate.len(),
+        40,
+        "expected a full object id: {candidate}"
+    );
+    assert_ne!(candidate, entry["base_commit"].as_str().unwrap());
+    let reachable = Command::new("git")
+        .args(["cat-file", "-e", &format!("{candidate}^{{commit}}")])
+        .current_dir(&fixture.repo)
+        .status()
+        .unwrap();
+    assert!(
+        reachable.success(),
+        "candidate commit {candidate} must survive worktree release"
+    );
 
     // The worktree is gone; the work survives on the order's branch.
     let worktree = entry["worktree"].as_str().unwrap();
@@ -2148,4 +2169,67 @@ verify_profile = "fast"
     let states = fixture.task_states();
     assert_eq!(states.len(), 2);
     assert!(states.iter().all(|(_, status)| status == "finished"));
+}
+
+/// The dependency-aware base: an order that declares `after` must build on its
+/// dependency's verified commit WITHOUT the user hand-writing a base. The
+/// executor exits 9 if the dependency's file is absent, so a regression here
+/// fails loudly rather than producing a plausible diff on the wrong tree.
+#[test]
+fn a_dependent_order_inherits_its_dependency_without_an_explicit_base() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "branch=$(git symbolic-ref --short HEAD)\n\
+         case \"$branch\" in\n\
+           *smn-first) echo 'pub fn first() {}' > src/first.rs ;;\n\
+           *smn-second) test -f src/first.rs || exit 9\n\
+                        echo 'pub fn second() {}' > src/second.rs ;;\n\
+         esac\n\
+         git add -A\ngit commit -qm 'executor work'",
+        60,
+    );
+    let a = fixture.order(
+        "first.toml",
+        r#"
+id = "first"
+title = "Write first"
+brief = "Write src/first.rs and commit."
+scope = ["src/first.rs"]
+verify_profile = "fast"
+"#,
+    );
+    // Deliberately no `base`: summoner must derive it from `after`.
+    let b = fixture.order(
+        "second.toml",
+        r#"
+id = "second"
+title = "Build on first"
+brief = "Write src/second.rs next to src/first.rs and commit."
+scope = ["src/second.rs"]
+verify_profile = "fast"
+after = ["first"]
+"#,
+    );
+
+    let report = fixture.run_report(&[&a, &b], 0);
+    assert_eq!(report["summary"]["verified"], 2, "{report}");
+    let orders = report["orders"].as_array().unwrap();
+    let first = orders.iter().find(|o| o["id"] == "first").unwrap();
+    let second = orders.iter().find(|o| o["id"] == "second").unwrap();
+
+    // The dependent branched from the dependency's exact verified commit, not
+    // from its branch name and not from the repository default.
+    assert_eq!(
+        second["base_commit"].as_str().unwrap(),
+        first["candidate_commit"].as_str().unwrap(),
+        "second must start at first's verified commit: {report}"
+    );
+    assert!(
+        second["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("built on first"),
+        "the inheritance must be recorded: {second}"
+    );
 }

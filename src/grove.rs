@@ -212,10 +212,16 @@ impl GroveCli {
     /// grove owns the deadline, so the executor dies on time even if summoner
     /// is killed first.
     pub fn exec_argv(&self, task_id: &str, timeout_secs: u64, executor: &[String]) -> Vec<String> {
+        // Executors are agent sessions, not build commands: the edit capability
+        // supervises lifetime and deadline without holding a build lane or
+        // admission slot, so the builds an agent runs acquire lanes on demand
+        // and a fleet is never throttled to max_builders live sessions.
         let mut argv = vec![
             self.bin.clone(),
             "task".into(),
             "exec".into(),
+            "--capability".into(),
+            "edit".into(),
             "--task-id".into(),
             task_id.into(),
             "--timeout-secs".into(),

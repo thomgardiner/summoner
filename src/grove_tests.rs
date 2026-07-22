@@ -106,6 +106,8 @@ fn exec_argv_wraps_the_executor_behind_the_supervisor() {
             "grove",
             "task",
             "exec",
+            "--capability",
+            "edit",
             "--task-id",
             "t-1",
             "--timeout-secs",

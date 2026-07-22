@@ -46,8 +46,50 @@ pub struct Config {
     pub executors: BTreeMap<String, ExecutorBackend>,
     pub profile: Option<String>,
     pub profiles: BTreeMap<String, Profile>,
+    /// Run-wide acceptance bar the orchestrator publishes. Enforced during
+    /// validation and scheduling; its digest is pinned in the run manifest and
+    /// report so consumers can prove which bar gated the run.
+    pub trusted_policy: Option<TrustedPolicy>,
     #[serde(skip)]
     pub(crate) frozen: bool,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrustedPolicy {
+    /// Every order must carry an independent reviewer; `reviewer = "none"` is refused.
+    pub require_reviewer: bool,
+    /// The reviewer backend must differ from the order's executor backend.
+    pub distinct_reviewer: bool,
+    /// Orders must verify with one of these grove profiles.
+    pub required_profiles: Vec<String>,
+    /// Closed set of executor names orders may use; empty allows any configured.
+    pub allowed_executors: Vec<String>,
+    /// Closed set of reviewer names; empty allows any configured.
+    pub allowed_reviewers: Vec<String>,
+    /// Protected paths beyond the built-in verification contract files. A diff
+    /// touching one caps the order at `unverified`, like the built-ins.
+    pub protected_paths: Vec<String>,
+    /// Let an unverified `completed` upstream satisfy `after` edges. Off by
+    /// default: under a trusted policy a dependency chain is only as green as
+    /// its weakest link, so unverified links must be accepted deliberately.
+    pub completed_satisfies_dependencies: bool,
+}
+
+impl TrustedPolicy {
+    /// Content address of the exact policy in force, for the manifest and report.
+    pub fn sha256(&self) -> String {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+        let mut hash = Sha256::new();
+        hash.update(b"summoner.trusted-policy.v1\0");
+        hash.update(serde_json::to_vec(self).expect("policy serializes"));
+        let mut hex = String::with_capacity(64);
+        for byte in hash.finalize() {
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        hex
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -256,6 +298,9 @@ fn merge(base: &mut Config, over: Config) {
             }
         }
     }
+    // Wholesale replacement: a policy is one coherent bar, never a field-wise
+    // blend of two authors' intentions.
+    base.trusted_policy = over.trusted_policy.or(base.trusted_policy.take());
     base.profile = over.profile.or(base.profile.take());
     for (name, profile) in over.profiles {
         match base.profiles.entry(name) {

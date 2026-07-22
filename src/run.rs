@@ -119,11 +119,12 @@ pub(crate) fn execute(
         ),
     };
     let started = Instant::now();
-    let mut fleet = worker::Fleet::new(orders, config.fail_fast(), config.run_token_budget());
+    let mut fleet = worker::Fleet::new(orders, &config);
     // Carried orders count as done so their dependents dispatch immediately, and
     // each is a durable terminal record before any worker dispatches.
     for prior in &carried {
-        fleet.carry(&prior.id, prior.outcome);
+        // A carried order's verified commit still anchors its dependents.
+        fleet.carry(&prior.id, prior.outcome, prior.candidate_commit.clone());
         ctx.events.emit_terminal("order_carried", prior)?;
     }
     fleet.run(&ctx, workers)?;
@@ -138,6 +139,7 @@ pub(crate) fn execute(
         started_at,
         started.elapsed().as_secs(),
         orders,
+        config.trusted_policy.as_ref().map(|policy| policy.sha256()),
     );
     // Fail closed: record run_finished before publishing report.json or the scorecard.
     ctx.events.emit(
@@ -355,8 +357,7 @@ mod tests {
         dependent.after.push("panics".into());
         let fleet = worker::Fleet::new(
             vec![order("panics"), order("independent"), dependent],
-            None,
-            None,
+            &config,
         );
         fleet
             .dispatch(&context(&config, dir.path(), &[]), 2, |_, order| {
@@ -392,7 +393,7 @@ mod tests {
     fn poisoned_scheduler_becomes_structured_order_failure() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
-        let fleet = worker::Fleet::new(vec![order("poisoned"), order("independent")], None, None);
+        let fleet = worker::Fleet::new(vec![order("poisoned"), order("independent")], &config);
         fleet.poison();
         fleet
             .dispatch(&context(&config, dir.path(), &[]), 2, |_, order| {

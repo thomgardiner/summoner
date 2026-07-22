@@ -16,13 +16,25 @@ pub(super) struct Fleet {
 }
 
 impl Fleet {
-    pub(super) fn new(orders: Vec<Order>, fail_fast: Option<usize>, budget: Option<u64>) -> Self {
+    pub(super) fn new(orders: Vec<Order>, config: &Config) -> Self {
+        // Under a trusted policy a dependency chain is only as green as its
+        // weakest link: an unverified `completed` upstream satisfies nothing
+        // unless the policy accepts it deliberately.
+        let completed_satisfies = config
+            .trusted_policy
+            .as_ref()
+            .is_none_or(|policy| policy.completed_satisfies_dependencies);
         Self {
-            scheduler: Mutex::new(Scheduler::new(orders, fail_fast, budget)),
+            scheduler: Mutex::new(Scheduler::new(
+                orders,
+                config.fail_fast(),
+                config.run_token_budget(),
+                completed_satisfies,
+            )),
         }
     }
 
-    pub(super) fn carry(&mut self, id: &str, outcome: Outcome) {
+    pub(super) fn carry(&mut self, id: &str, outcome: Outcome, candidate: Option<String>) {
         let scheduler = match self.scheduler.get_mut() {
             Ok(scheduler) => scheduler,
             Err(error) => {
@@ -31,7 +43,7 @@ impl Fleet {
                 scheduler
             }
         };
-        scheduler.complete(id, outcome);
+        scheduler.complete(id, outcome, candidate);
     }
 
     pub(super) fn run(&self, ctx: &Ctx<'_>, workers: usize) -> Result<()> {
@@ -105,12 +117,57 @@ impl Fleet {
                     let report = skipped(&order, ctx.config, reason);
                     (order, report)
                 }
-                Next::Run(order) => {
-                    let report = match catch_unwind(AssertUnwindSafe(|| run_order(ctx, &order))) {
-                        Ok(report) => report,
-                        Err(payload) => failed(&order, ctx.config, WorkerFailure::panic(payload)),
-                    };
-                    (order, report)
+                Next::Run(mut order, landed) => {
+                    // `after` orders work; this is what makes a dependent build
+                    // *on* it. A conflict between dependencies is reported, not
+                    // resolved: starting on the wrong tree would waste a whole
+                    // executor run and produce a plausible-looking diff.
+                    match crate::integration::resolve(
+                        &ctx.repo,
+                        order.base.as_deref(),
+                        &order.after,
+                        &landed,
+                    ) {
+                        Ok(crate::integration::Base::Conflicted { left, right, paths }) => {
+                            let report = skipped(
+                                &order,
+                                ctx.config,
+                                format!(
+                                    "not started: dependencies {left} and {right} conflict in {}",
+                                    paths.join(", ")
+                                ),
+                            );
+                            (order, report)
+                        }
+                        Ok(base) => {
+                            if let Some(commit) = base.commit() {
+                                order.base = Some(commit.to_string());
+                            }
+                            let inherited = base.detail();
+                            let mut report =
+                                match catch_unwind(AssertUnwindSafe(|| run_order(ctx, &order))) {
+                                    Ok(report) => report,
+                                    Err(payload) => {
+                                        failed(&order, ctx.config, WorkerFailure::panic(payload))
+                                    }
+                                };
+                            if let Some(inherited) = inherited {
+                                report.detail = Some(match report.detail.take() {
+                                    Some(detail) => format!("{detail}; {inherited}"),
+                                    None => inherited,
+                                });
+                            }
+                            (order, report)
+                        }
+                        Err(error) => {
+                            let report = errored(
+                                &order,
+                                ctx.config,
+                                format!("resolving the base from dependencies: {error:#}"),
+                            );
+                            (order, report)
+                        }
+                    }
                 }
                 Next::Fail(order, failure) => {
                     let report = failed(&order, ctx.config, failure);
@@ -120,7 +177,8 @@ impl Fleet {
             if ctx.events.emit_terminal("order_finished", &report).is_err() {
                 break;
             }
-            self.lock().complete(&order.id, report.outcome);
+            self.lock()
+                .complete(&order.id, report.outcome, report.candidate_commit.clone());
         }
     }
 
@@ -155,11 +213,16 @@ struct Scheduler {
     fail_fast: Option<usize>,
     failures: usize,
     budget: Option<u64>,
+    completed_satisfies: bool,
+    /// Verified commit per finished order, so a dependent can build on it.
+    landed: BTreeMap<String, String>,
     poisoned: bool,
 }
 
 enum Next {
-    Run(Box<Order>),
+    /// The order plus the verified commit of each finished dependency, so the
+    /// worker can resolve what it should build on.
+    Run(Box<Order>, BTreeMap<String, String>),
     Skip(Box<Order>, String),
     Fail(Box<Order>, WorkerFailure),
     Wait,
@@ -167,13 +230,20 @@ enum Next {
 }
 
 impl Scheduler {
-    fn new(orders: Vec<Order>, fail_fast: Option<usize>, budget: Option<u64>) -> Self {
+    fn new(
+        orders: Vec<Order>,
+        fail_fast: Option<usize>,
+        budget: Option<u64>,
+        completed_satisfies: bool,
+    ) -> Self {
         Self {
             pending: orders,
             done: BTreeMap::new(),
             fail_fast,
             failures: 0,
             budget,
+            completed_satisfies,
+            landed: BTreeMap::new(),
             poisoned: false,
         }
     }
@@ -214,7 +284,15 @@ impl Scheduler {
             let mut condemned = None;
             for dep in &self.pending[index].after {
                 match self.done.get(dep) {
-                    Some(Outcome::Verified | Outcome::Completed | Outcome::Approved) => {}
+                    Some(Outcome::Verified | Outcome::Approved) => {}
+                    Some(Outcome::Completed) if self.completed_satisfies => {}
+                    Some(Outcome::Completed) => {
+                        condemned = Some(format!(
+                            "dependency {dep:?} was completed without verification, \
+                             which the trusted policy does not accept"
+                        ));
+                        break;
+                    }
                     Some(outcome) => {
                         condemned = Some(format!("dependency {dep:?} was {}", outcome.key()));
                         break;
@@ -226,7 +304,13 @@ impl Scheduler {
                 return Next::Skip(Box::new(self.pending.remove(index)), reason);
             }
             if !in_flight {
-                return Next::Run(Box::new(self.pending.remove(index)));
+                let order = self.pending.remove(index);
+                let landed = order
+                    .after
+                    .iter()
+                    .filter_map(|id| self.landed.get(id).map(|c| (id.clone(), c.clone())))
+                    .collect();
+                return Next::Run(Box::new(order), landed);
             }
         }
         Next::Wait
@@ -239,7 +323,10 @@ impl Scheduler {
         }
     }
 
-    fn complete(&mut self, id: &str, outcome: Outcome) {
+    fn complete(&mut self, id: &str, outcome: Outcome, candidate: Option<String>) {
+        if let Some(candidate) = candidate {
+            self.landed.insert(id.to_string(), candidate);
+        }
         if matches!(
             outcome,
             Outcome::Error
@@ -261,6 +348,16 @@ fn skipped(order: &Order, config: &Config, reason: String) -> OrderReport {
     let mut report = OrderReport::new(order, executor);
     report.outcome = Outcome::Skipped;
     report.detail = Some(reason);
+    report
+}
+
+/// An infrastructure failure that is not a worker panic: the order never ran,
+/// and the run must not exit green because of it.
+fn errored(order: &Order, config: &Config, detail: String) -> OrderReport {
+    let executor = order.executor_name(config).unwrap_or_default();
+    let mut report = OrderReport::new(order, executor);
+    report.outcome = Outcome::Error;
+    report.detail = Some(detail);
     report
 }
 
@@ -302,11 +399,11 @@ mod tests {
 
     #[test]
     fn budget_breaker_skips_the_queue_once_spent_crosses_the_ceiling() {
-        let mut scheduler = Scheduler::new(vec![order("a"), order("b")], None, Some(100));
-        let Next::Run(first) = scheduler.next(0) else {
+        let mut scheduler = Scheduler::new(vec![order("a"), order("b")], None, Some(100), true);
+        let Next::Run(first, _) = scheduler.next(0) else {
             panic!("first order dispatches under budget");
         };
-        scheduler.complete(&first.id, Outcome::Verified);
+        scheduler.complete(&first.id, Outcome::Verified, None);
         match scheduler.next(150) {
             Next::Skip(second, reason) => {
                 assert_eq!(second.id, "b");
@@ -314,5 +411,41 @@ mod tests {
             }
             _ => panic!("over-budget queue must drain as skipped"),
         }
+    }
+
+    #[test]
+    fn unverified_completed_upstream_blocks_dependents_under_a_trusted_policy() {
+        let mut dependent = order("b");
+        dependent.after.push("a".into());
+        let mut scheduler = Scheduler::new(vec![order("a"), dependent], None, None, false);
+        let Next::Run(first, _) = scheduler.next(0) else {
+            panic!("the independent order dispatches first");
+        };
+        scheduler.complete(&first.id, Outcome::Completed, None);
+        match scheduler.next(0) {
+            Next::Skip(second, reason) => {
+                assert_eq!(second.id, "b");
+                assert!(
+                    reason.contains("completed without verification"),
+                    "{reason}"
+                );
+            }
+            _ => panic!("an unverified dependency must not satisfy an after edge"),
+        }
+    }
+
+    #[test]
+    fn completed_upstream_still_satisfies_dependents_without_a_trusted_policy() {
+        let mut dependent = order("b");
+        dependent.after.push("a".into());
+        let mut scheduler = Scheduler::new(vec![order("a"), dependent], None, None, true);
+        let Next::Run(first, _) = scheduler.next(0) else {
+            panic!("the independent order dispatches first");
+        };
+        scheduler.complete(&first.id, Outcome::Completed, None);
+        let Next::Run(second, _) = scheduler.next(0) else {
+            panic!("completed satisfies dependencies when no policy narrows it");
+        };
+        assert_eq!(second.id, "b");
     }
 }

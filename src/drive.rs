@@ -469,7 +469,14 @@ impl<'a> OrderRun<'a> {
     /// along to the reviewer. A scan that cannot collect evidence propagates
     /// as `error`: the gate never reports a pass it did not perform.
     fn protected_tripwire(&self, report: &mut OrderReport) -> Result<bool> {
-        let trips = tripwires::scan(&self.worktree, &self.base)?;
+        let policy_protected = self
+            .ctx
+            .config
+            .trusted_policy
+            .as_ref()
+            .map(|policy| policy.protected_paths.as_slice())
+            .unwrap_or_default();
+        let trips = tripwires::scan(&self.worktree, &self.base, policy_protected)?;
         report.tripwires = trips.flags.clone();
         if trips.protected.is_empty() {
             return Ok(false);

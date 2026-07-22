@@ -123,12 +123,12 @@ fn require_grove(grove: &str) {
     let version = Command::new(grove)
         .arg("--version")
         .output()
-        .expect("Grove 0.3.4 must be installed or SUMMONER_TEST_GROVE must name it");
+        .expect("Grove 0.3.5 must be installed or SUMMONER_TEST_GROVE must name it");
     assert_success(&version);
     assert_eq!(
         String::from_utf8_lossy(&version.stdout).trim(),
-        "grove 0.3.4",
-        "fleet qualification requires exact Grove 0.3.4"
+        "grove 0.3.5",
+        "fleet qualification requires exact Grove 0.3.5"
     );
     let status = Command::new(grove)
         .args(["task", "status", "--json"])

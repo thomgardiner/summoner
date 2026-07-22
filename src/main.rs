@@ -9,6 +9,7 @@ mod executor;
 mod gate;
 mod grove;
 mod init;
+mod integration;
 mod lifecycle;
 mod order;
 mod outcome;

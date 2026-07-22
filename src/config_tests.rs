@@ -137,6 +137,44 @@ fn repository_cannot_persist_an_authentication_acknowledgement() {
 }
 
 #[test]
+fn repository_cannot_publish_the_trusted_policy_that_gates_it() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(
+        repo.path().join(".summoner.toml"),
+        "[trusted_policy]\nrequire_reviewer = false\n",
+    )
+    .unwrap();
+    let error = match load::load_from(repo.path()) {
+        Ok(_) => panic!("repository published its own acceptance bar"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("cannot set trusted_policy"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn a_trusted_policy_digest_changes_with_every_field_that_narrows_it() {
+    let base = crate::config::TrustedPolicy::default();
+    let baseline = base.sha256();
+    assert_eq!(baseline.len(), 64);
+    assert_eq!(baseline, crate::config::TrustedPolicy::default().sha256());
+
+    let mut stricter = base.clone();
+    stricter.require_reviewer = true;
+    assert_ne!(stricter.sha256(), baseline);
+
+    let mut narrowed = base.clone();
+    narrowed.allowed_executors = vec!["codex".into()];
+    assert_ne!(narrowed.sha256(), baseline);
+
+    let mut protected = base.clone();
+    protected.protected_paths = vec!["ci/verify.sh".into()];
+    assert_ne!(protected.sha256(), baseline);
+}
+
+#[test]
 fn executor_backend_parses_with_routing_and_defaults() {
     let cfg: Config = toml::from_str(
         r#"

@@ -44,7 +44,11 @@ pub struct Tripwires {
 }
 
 /// Scan the committed and uncommitted delta since `base` in `worktree`.
-pub fn scan(worktree: &Path, base: &str) -> Result<Tripwires> {
+/// `extra_protected` carries the trusted policy's `protected_paths`, which join
+/// the built-in list: verification commands can read files Grove's policy digest
+/// cannot bind (a `ci/verify.sh` the profile shells out to), so the operator
+/// names them here and a diff that touches one caps the order at `unverified`.
+pub fn scan(worktree: &Path, base: &str, extra_protected: &[String]) -> Result<Tripwires> {
     let mut changed = changed_entries(&git(worktree, &["diff", "--name-status", base])?);
     for line in git(worktree, &["status", "--porcelain"])?.lines() {
         if line.len() > 3 {
@@ -60,7 +64,7 @@ pub fn scan(worktree: &Path, base: &str) -> Result<Tripwires> {
         }
     }
     let diff = git(worktree, &["diff", base])?;
-    Ok(analyze(&changed, &diff))
+    Ok(analyze_with(&changed, &diff, extra_protected))
 }
 
 /// Parse `git diff --name-status` records. Renames and copies ("R100\told\tnew")
@@ -81,12 +85,23 @@ fn changed_entries(name_status: &str) -> Vec<(char, String)> {
 }
 
 /// Pure analysis over a change list and unified diff text.
+#[cfg(test)]
 pub fn analyze(changed: &[(char, String)], diff: &str) -> Tripwires {
+    analyze_with(changed, diff, &[])
+}
+
+pub fn analyze_with(
+    changed: &[(char, String)],
+    diff: &str,
+    extra_protected: &[String],
+) -> Tripwires {
     let mut protected = BTreeSet::new();
     let mut flags = Vec::new();
 
     for (status, path) in changed {
-        if PROTECTED.contains(&path.as_str()) {
+        if PROTECTED.contains(&path.as_str())
+            || extra_protected.iter().any(|entry| protects(entry, path))
+        {
             protected.insert(path.clone());
         }
         if *status == 'D' && path.contains("test") {
@@ -138,6 +153,20 @@ pub fn analyze(changed: &[(char, String)], diff: &str) -> Tripwires {
         protected: protected.into_iter().collect(),
         flags,
     }
+}
+
+/// A policy entry protects an exact repo-relative path, or every path beneath it
+/// when it names a directory. Paths are compared with forward slashes because
+/// that is what git reports on every platform.
+fn protects(entry: &str, path: &str) -> bool {
+    let entry = entry.trim_end_matches('/');
+    if entry.is_empty() {
+        return false;
+    }
+    path == entry
+        || path
+            .strip_prefix(entry)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
@@ -258,5 +287,40 @@ mod tests {
         let trips = analyze(&owned(&[('M', "src/lib.rs")]), diff);
         assert!(trips.protected.is_empty());
         assert!(trips.flags.is_empty(), "{:?}", trips.flags);
+    }
+
+    #[test]
+    fn policy_protected_paths_join_the_builtin_list_exactly_and_by_directory() {
+        let policy = ["ci/verify.sh".to_string(), "scripts/gates".to_string()];
+        let trips = analyze_with(
+            &owned(&[
+                ('M', "ci/verify.sh"),
+                ('M', "scripts/gates/lint.sh"),
+                ('M', "src/lib.rs"),
+                ('M', "ci/verify.sh.bak"),
+                ('M', "scripts/gates-extra/x.sh"),
+            ]),
+            "",
+            &policy,
+        );
+        assert_eq!(trips.protected, ["ci/verify.sh", "scripts/gates/lint.sh"]);
+        assert!(
+            trips
+                .flags
+                .iter()
+                .any(|f| f == "protected file modified: ci/verify.sh"),
+            "{:?}",
+            trips.flags
+        );
+    }
+
+    #[test]
+    fn an_empty_policy_entry_protects_nothing() {
+        let trips = analyze_with(
+            &owned(&[('M', "src/lib.rs")]),
+            "",
+            &["".to_string(), "/".to_string()],
+        );
+        assert!(trips.protected.is_empty(), "{:?}", trips.protected);
     }
 }

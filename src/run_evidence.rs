@@ -96,6 +96,8 @@ fn manifest(
             fail_fast: config.fail_fast(),
             revise: config.revise(),
             run_token_budget: config.run_token_budget(),
+            trusted_policy: config.trusted_policy.clone(),
+            trusted_policy_sha256: config.trusted_policy.as_ref().map(|policy| policy.sha256()),
         },
         orders,
         backends,
@@ -294,6 +296,8 @@ mod tests {
                 fail_fast: None,
                 revise: 0,
                 run_token_budget: None,
+                trusted_policy: None,
+                trusted_policy_sha256: None,
             },
             orders: vec![ManifestOrder {
                 source_path: "/repo/a.toml".into(),

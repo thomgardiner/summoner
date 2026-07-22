@@ -15,6 +15,9 @@ pub struct Evidence<'a> {
     pub uncommitted: &'a str,
     pub tripwires: &'a [String],
     pub verify: &'a [VerifySummary],
+    /// Content address of the trusted policy gating this run, when one is
+    /// declared, so the verdict is provably tied to the bar it applied.
+    pub trusted_policy_sha256: Option<&'a str>,
 }
 
 pub fn compose_prompt(order: &Order, evidence: &Evidence<'_>, protocol: &str) -> String {
@@ -49,6 +52,9 @@ pub fn compose_prompt(order: &Order, evidence: &Evidence<'_>, protocol: &str) ->
         prompt.push_str("```\n");
         prompt.push_str(evidence.uncommitted);
         prompt.push_str("\n```\n");
+    }
+    if let Some(digest) = evidence.trusted_policy_sha256 {
+        prompt.push_str(&format!("\n## Trusted policy\n- sha256: {digest}\n"));
     }
     prompt.push_str("\n## Tripwires (deterministic anomaly indicators)\n");
     if evidence.tripwires.is_empty() {
@@ -128,11 +134,13 @@ mod tests {
             uncommitted: "?? x",
             tripwires: &["assertion loss".into()],
             verify: &[],
+            trusted_policy_sha256: Some("deadbeef"),
         };
         let prompt = compose_prompt(&order(), &evidence, "BOUND-PROTOCOL");
         let points = [
             "# Review charter",
             "Do the thing.",
+            "sha256: deadbeef",
             "assertion loss",
             "+fn x()",
             "BOUND-PROTOCOL",

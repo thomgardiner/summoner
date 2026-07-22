@@ -3,14 +3,20 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const VERSION: &str = "0.3.4";
+const VERSION: &str = "0.3.5";
 
 #[derive(Deserialize)]
 struct Report {
     schema_version: u64,
     grove_version: String,
     status: Status,
+    task: Task,
     inspection: Inspection,
+}
+#[derive(Deserialize)]
+struct Task {
+    exec_capabilities: Vec<String>,
+    verification_policy_pinned: bool,
 }
 #[derive(Deserialize)]
 struct Status {
@@ -34,6 +40,8 @@ pub struct Capabilities {
     pub repository_schema: u64,
     pub task_status_schema: u64,
     pub task_record_schema: u64,
+    pub exec_capabilities: Vec<String>,
+    pub verification_policy_pinned: bool,
     pub inspection_binding_schema: u64,
     pub inspection_execution_schema: u64,
     pub process_tree: String,
@@ -51,7 +59,11 @@ pub(super) fn check(cli: &GroveCli) -> Result<Capabilities> {
         && report.grove_version == VERSION
         && report.status.repository_schema == 1
         && report.status.task_status_schema == 3
-        && report.status.task_record_schema == 5
+        && report.status.task_record_schema == 6
+        // Executors run under `task exec --capability edit`; a Grove without it
+        // would either reject the flag or silently hold a lane per session.
+        && report.task.exec_capabilities.iter().any(|name| name == "edit")
+        && report.task.verification_policy_pinned
         && report.inspection.binding_schema == 1
         && report.inspection.execution_schema == 1
         && report.inspection.filesystem == "read_only_permissions_and_digest"
@@ -62,13 +74,18 @@ pub(super) fn check(cli: &GroveCli) -> Result<Capabilities> {
             "windows_job_object" | "unix_process_group_best_effort"
         );
     if !exact {
-        bail!("Grove capabilities do not match the release-qualified 0.3.4 inspection contract")
+        bail!(
+            "Grove capabilities do not match the release-qualified {VERSION} task and \
+             inspection contract"
+        )
     }
     Ok(Capabilities {
         version: report.grove_version,
         repository_schema: 1,
         task_status_schema: 3,
-        task_record_schema: 5,
+        task_record_schema: 6,
+        exec_capabilities: report.task.exec_capabilities,
+        verification_policy_pinned: true,
         inspection_binding_schema: 1,
         inspection_execution_schema: 1,
         process_tree: report.inspection.process_tree,

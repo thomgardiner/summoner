@@ -35,6 +35,13 @@ pub(crate) fn finalize(
             .unwrap_or(0);
         report.diff = Some(diff_stats(worktree, &base));
     }
+    // The last moment the reviewed candidate is identifiable: release may
+    // salvage dirty state into a fresh commit and move the branch, after which
+    // the branch name no longer names what was verified and reviewed.
+    report.candidate_commit = git(worktree, &["rev-parse", "HEAD"])
+        .ok()
+        .map(|oid| oid.trim().to_string())
+        .filter(|oid| !oid.is_empty());
     if let Some(path) = &report.stdout_log {
         report.stdout_tail = executor::tail(Path::new(path), TAIL_BYTES);
     }

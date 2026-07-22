@@ -30,10 +30,12 @@ pub struct Order {
     pub max_tokens: Option<u64>,
     pub base: Option<String>,
     pub branch: Option<String>,
-    /// Order ids that must reach `verified` or `completed` first. Ordering and
-    /// failure propagation only: a dependent still builds from its own `base`,
-    /// so an order that needs a dependency's changes says so explicitly with
-    /// `base = "grove/smn-<dep-id>"` (branch names are deterministic).
+    /// Order ids that must finish first. This orders dispatch AND supplies the
+    /// base: a dependent branches from its dependencies' verified commits, so
+    /// their code is present without naming a base by hand. One dependency is
+    /// inherited directly, several are merged, and dependencies that conflict
+    /// skip the order rather than starting it on a tree missing half its
+    /// inputs. An explicit `base` still wins.
     #[serde(default)]
     pub after: Vec<String>,
     /// N-version dispatch: executor names that each attempt this order
@@ -240,6 +242,13 @@ pub fn validate(orders: &[Order], config: &Config) -> Vec<String> {
                 problems.push(format!("{at}: reviewer {name:?} is not configured"));
             }
         }
+        if let Some(policy) = config.trusted_policy.as_ref() {
+            problems.extend(
+                policy_problems(order, config, policy)
+                    .into_iter()
+                    .map(|problem| format!("{at}: {problem}")),
+            );
+        }
     }
 
     let expanded_ids: BTreeSet<&str> = orders
@@ -271,6 +280,65 @@ pub fn validate(orders: &[Order], config: &Config) -> Vec<String> {
 
     for name in used_backends {
         problems.extend(backend_problems(&name, &config.executors[&name]));
+    }
+    problems
+}
+
+/// The trusted policy's per-order demands. Unknown executors and reviewers are
+/// already reported by the base validation, so absence here means "resolve
+/// failed" and stays quiet rather than doubling up.
+fn policy_problems(
+    order: &Order,
+    config: &Config,
+    policy: &crate::config::TrustedPolicy,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let reviewer = order.reviewer_name(config);
+    if policy.require_reviewer && reviewer.is_none() {
+        problems.push("trusted policy requires an independent reviewer".to_string());
+    }
+    if let (Some(reviewer), Some(executor)) = (reviewer.as_deref(), order.executor_name(config)) {
+        if policy.distinct_reviewer && reviewer == executor {
+            problems.push(format!(
+                "trusted policy requires a reviewer distinct from executor {executor:?}"
+            ));
+        }
+        if !policy.allowed_reviewers.is_empty()
+            && !policy.allowed_reviewers.iter().any(|name| name == reviewer)
+        {
+            problems.push(format!(
+                "trusted policy does not allow reviewer {reviewer:?} (allowed: {})",
+                policy.allowed_reviewers.join(", ")
+            ));
+        }
+    }
+    if let Some(executor) = order.executor_name(config)
+        && !policy.allowed_executors.is_empty()
+        && !policy
+            .allowed_executors
+            .iter()
+            .any(|name| name == &executor)
+    {
+        problems.push(format!(
+            "trusted policy does not allow executor {executor:?} (allowed: {})",
+            policy.allowed_executors.join(", ")
+        ));
+    }
+    if !policy.required_profiles.is_empty() {
+        let profile = order
+            .verify_profile
+            .clone()
+            .or_else(|| config.default_verify_profile.clone());
+        let allowed = profile
+            .as_deref()
+            .is_some_and(|name| policy.required_profiles.iter().any(|p| p == name));
+        if !allowed {
+            problems.push(format!(
+                "trusted policy requires a verify_profile from [{}], got {}",
+                policy.required_profiles.join(", "),
+                profile.as_deref().unwrap_or("none")
+            ));
+        }
     }
     problems
 }
@@ -878,5 +946,67 @@ acceptance = ["tests pass"]
 
         assert!(validate(&orders, &config).is_empty());
         assert!(warnings(&orders, &config).is_empty());
+    }
+
+    #[test]
+    fn a_trusted_policy_refuses_ungated_orders_and_disallowed_backends() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_with(
+            Some("fake"),
+            &[
+                ("fake", &["fake", "{prompt}"], PromptRouting::Arg),
+                ("judge", &["judge", "{prompt}"], PromptRouting::Arg),
+                ("stranger", &["stranger", "{prompt}"], PromptRouting::Arg),
+            ],
+        );
+        config.trusted_policy = Some(crate::config::TrustedPolicy {
+            require_reviewer: true,
+            distinct_reviewer: true,
+            required_profiles: vec!["full".into()],
+            allowed_executors: vec!["fake".into()],
+            allowed_reviewers: vec!["judge".into()],
+            protected_paths: Vec::new(),
+            completed_satisfies_dependencies: false,
+        });
+
+        // Ungated, wrong profile: every demand is named in one pass.
+        let ungated = write_order(
+            dir.path(),
+            "ungated.toml",
+            "id = \"ungated\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\nreviewer = \"none\"\n",
+        );
+        let text = validate(&load(&[ungated]).unwrap(), &config).join("\n");
+        assert!(text.contains("requires an independent reviewer"), "{text}");
+        assert!(
+            text.contains("requires a verify_profile from [full]"),
+            "{text}"
+        );
+
+        // Reviewer equal to executor, and neither backend on the allow lists.
+        let same = write_order(
+            dir.path(),
+            "same.toml",
+            "id = \"same\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\n\
+             executor = \"stranger\"\nreviewer = \"stranger\"\nverify_profile = \"full\"\n",
+        );
+        let text = validate(&load(&[same]).unwrap(), &config).join("\n");
+        assert!(text.contains("reviewer distinct from executor"), "{text}");
+        assert!(
+            text.contains("does not allow executor \"stranger\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("does not allow reviewer \"stranger\""),
+            "{text}"
+        );
+
+        // A compliant order validates clean under the same policy.
+        let good = write_order(
+            dir.path(),
+            "good.toml",
+            "id = \"good\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\n\
+             executor = \"fake\"\nreviewer = \"judge\"\nverify_profile = \"full\"\n",
+        );
+        assert!(validate(&load(&[good]).unwrap(), &config).is_empty());
     }
 }
