@@ -154,6 +154,26 @@ fn a_dependency_without_a_candidate_commit_refuses_the_order() {
     assert!(resolved.detail().unwrap().contains("ghost"));
 }
 
+/// A missing candidate fails the order closed regardless of base: an explicit
+/// base cannot be proven to contain work no commit identifies, so it must not
+/// be a loophole around the implicit-base MissingCandidate refusal.
+#[test]
+fn a_missing_candidate_refuses_even_with_an_explicit_base() {
+    let (dir, landed) = repo();
+    let resolved = resolve(
+        dir.path(),
+        Some("main"),
+        &["ghost".to_string(), "alpha".to_string()],
+        &landed,
+    )
+    .unwrap();
+    let Base::MissingCandidate { id } = &resolved else {
+        panic!("expected fail-closed even with an explicit base, got {resolved:?}");
+    };
+    assert_eq!(id, "ghost");
+    assert_eq!(resolved.commit(), None);
+}
+
 /// An explicit base only wins when it contains every dependency's candidate:
 /// `after` is a dataflow edge, and a base that excludes a dependency would
 /// wait for work and then build without it.

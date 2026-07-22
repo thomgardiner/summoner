@@ -101,33 +101,33 @@ pub fn resolve(
     after: &[String],
     landed: &BTreeMap<String, String>,
 ) -> Result<Base> {
-    if let Some(base) = explicit {
-        // Unresolvable here just means the ref is not visible yet; worktree
-        // acquisition is the authority on whether it exists at all. Only this
-        // order's own dependencies are checked, and only those that recorded a
-        // candidate: with an explicit base, a dependency without one is a pure
-        // ordering edge, which is exactly the legacy contract.
-        if let Ok(base_commit) = rev_parse(repo, base) {
-            for id in after {
-                let Some(commit) = landed.get(id) else {
-                    continue;
-                };
-                if !is_ancestor(repo, commit, &base_commit)? {
-                    return Ok(Base::ExcludedDependency {
-                        id: id.clone(),
-                        base: base.to_string(),
-                    });
-                }
-            }
-        }
-        return Ok(Base::Declared(Some(base.to_string())));
-    }
+    // A dependency with no candidate finished with work no commit identifies,
+    // so no base — explicit or derived — can be proven to contain it. Fail
+    // closed the same way regardless of base, rather than letting an explicit
+    // base quietly turn a dataflow edge back into mere ordering.
     let mut inherited: Vec<(&String, &String)> = Vec::new();
     for id in after {
         match landed.get(id) {
             Some(commit) => inherited.push((id, commit)),
             None => return Ok(Base::MissingCandidate { id: id.clone() }),
         }
+    }
+    if let Some(base) = explicit {
+        // An explicit base wins, but only once it is proven to contain every
+        // dependency's candidate: a base that excludes one silently drops that
+        // dependency's verified work. An unresolvable ref is not judged here;
+        // worktree acquisition is the authority on whether it exists.
+        if let Ok(base_commit) = rev_parse(repo, base) {
+            for (id, commit) in &inherited {
+                if !is_ancestor(repo, commit, &base_commit)? {
+                    return Ok(Base::ExcludedDependency {
+                        id: (*id).clone(),
+                        base: base.to_string(),
+                    });
+                }
+            }
+        }
+        return Ok(Base::Declared(Some(base.to_string())));
     }
     match inherited.as_slice() {
         [] => Ok(Base::Declared(None)),

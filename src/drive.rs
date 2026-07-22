@@ -207,6 +207,10 @@ impl<'a> OrderRun<'a> {
         } else {
             format!("r{attempt}-")
         };
+        // Tripwires reflect this attempt only. Clearing here, before anything
+        // adds to them, lets scrape_output's warnings survive the diff-scan
+        // assignment below instead of being overwritten by it.
+        report.tripwires.clear();
         let exec = self.spawn_executor(report, attempt, &prefix)?;
         self.scrape_output(report, &prefix);
         self.ctx.events.emit(
@@ -486,7 +490,11 @@ impl<'a> OrderRun<'a> {
             .map(|policy| policy.protected_paths.as_slice())
             .unwrap_or_default();
         let trips = tripwires::scan(&self.worktree, &self.base, policy_protected)?;
-        report.tripwires = trips.flags.clone();
+        // Extend, not assign: scrape_output may already have added a run-quality
+        // warning (an unmatched usage_marker) that must not be wiped by the
+        // diff scan. Tripwires are cleared once per attempt, so this never
+        // accumulates across attempts.
+        report.tripwires.extend(trips.flags.iter().cloned());
         if trips.protected.is_empty() {
             return Ok(false);
         }

@@ -1302,8 +1302,10 @@ fn sigterm_tears_down_the_fleet_and_still_emits_a_partial_report() {
         .spawn()
         .unwrap();
 
-    // Interrupt only once the executor is actually running.
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Interrupt only once the executor is actually running. A cold worktree
+    // acquire is ~10s and stretches further under a loaded CI runner, so the
+    // deadline covers that with margin rather than flaking on dispatch timing.
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let streamed = std::fs::read_to_string(&stdout_path).unwrap_or_default();
         if streamed.contains("order_dispatched") {
@@ -1400,6 +1402,41 @@ fn usage_marker_records_tokens_per_order_and_per_run() {
     let report = fixture.run_report(&[&order], 0);
     assert_eq!(report["orders"][0]["usage_tokens"], 1234, "{report}");
     assert_eq!(report["usage_tokens"], 1234, "{report}");
+}
+
+/// A configured usage_marker that never matches the executor's output must
+/// surface as a tripwire on the report — including the successful verified
+/// path, where a prior version had the diff scan overwrite the warning. A
+/// silent hole in budget accounting is exactly what this warning exists to
+/// prevent.
+#[test]
+fn an_unmatched_usage_marker_warns_on_the_verified_path() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    // The executor commits real work (so the order verifies) but never prints
+    // the configured marker, so token usage cannot be scraped.
+    fixture.executor(
+        "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm work",
+        60,
+    );
+    fixture.append_config("usage_marker = \"tokens used\"");
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let report = fixture.run_report(&[&order], 0);
+    let entry = &report["orders"][0];
+    assert_eq!(entry["outcome"], "verified", "{report}");
+    assert!(
+        entry["usage_tokens"].is_null(),
+        "nothing was scraped: {entry}"
+    );
+    let tripwires = entry["tripwires"].as_array().expect("tripwires present");
+    assert!(
+        tripwires
+            .iter()
+            .any(|t| t.as_str().unwrap_or_default().contains("usage_marker")
+                && t.as_str().unwrap_or_default().contains("never matched")),
+        "the unmatched-marker warning must survive to the report: {entry}"
+    );
 }
 
 #[test]
