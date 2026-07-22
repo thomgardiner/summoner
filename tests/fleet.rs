@@ -2233,3 +2233,74 @@ after = ["first"]
         "the inheritance must be recorded: {second}"
     );
 }
+
+/// Review-required regression: an upstream that leaves uncommitted work has no
+/// immutable candidate, so it records no candidate commit and its dependent
+/// refuses to start rather than building on a tree missing that work. HEAD
+/// alone must never be presented as the identity of a dirty candidate.
+#[test]
+fn a_dirty_upstream_records_no_candidate_and_its_dependent_refuses() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    fixture.executor(
+        "branch=$(git symbolic-ref --short HEAD)\n\
+         case \"$branch\" in\n\
+           *smn-dirty) echo 'pub fn dirty() {}' > src/one.rs ;;\n\
+           *) echo 'pub fn other() {}' > src/two.rs\n\
+              git add -A\ngit commit -qm 'executor work' ;;\n\
+         esac",
+        60,
+    );
+    let a = fixture.order(
+        "dirty.toml",
+        r#"
+id = "dirty"
+title = "Leave uncommitted work"
+brief = "Write src/one.rs and do not commit."
+scope = ["src/one.rs"]
+verify_profile = "fast"
+"#,
+    );
+    let b = fixture.order(
+        "downstream.toml",
+        r#"
+id = "downstream"
+title = "Build on dirty"
+brief = "Write src/two.rs."
+scope = ["src/two.rs"]
+verify_profile = "fast"
+after = ["dirty"]
+"#,
+    );
+
+    let report = fixture.run_report(&[&a, &b], 1);
+    let orders = report["orders"].as_array().unwrap();
+    let dirty = orders.iter().find(|o| o["id"] == "dirty").unwrap();
+    let downstream = orders.iter().find(|o| o["id"] == "downstream").unwrap();
+
+    assert_eq!(dirty["outcome"], "verified", "{report}");
+    assert!(
+        dirty["candidate_commit"].is_null(),
+        "a dirty candidate must not be identified by HEAD: {dirty}"
+    );
+    assert!(
+        dirty["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("uncommitted work at finish"),
+        "{dirty}"
+    );
+
+    assert_eq!(downstream["outcome"], "skipped", "{downstream}");
+    assert!(
+        downstream["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("immutable candidate"),
+        "{downstream}"
+    );
+    assert!(
+        downstream["worktree"].is_null(),
+        "never dispatched: {downstream}"
+    );
+}

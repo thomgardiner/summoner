@@ -128,15 +128,20 @@ impl Fleet {
                         &order.after,
                         &landed,
                     ) {
-                        Ok(crate::integration::Base::Conflicted { left, right, paths }) => {
-                            let report = skipped(
-                                &order,
-                                ctx.config,
-                                format!(
-                                    "not started: dependencies {left} and {right} conflict in {}",
-                                    paths.join(", ")
-                                ),
-                            );
+                        // Every refusing variant carries its reason in
+                        // detail(); an order that cannot safely start is
+                        // skipped with that reason rather than dispatched onto
+                        // a tree missing part of its declared inputs.
+                        Ok(
+                            base @ (crate::integration::Base::Conflicted { .. }
+                            | crate::integration::Base::MissingCandidate { .. }
+                            | crate::integration::Base::ExcludedDependency { .. }),
+                        ) => {
+                            let reason = base
+                                .detail()
+                                .unwrap_or_else(|| "dependency resolution refused".to_string());
+                            let report =
+                                skipped(&order, ctx.config, format!("not started: {reason}"));
                             (order, report)
                         }
                         Ok(base) => {

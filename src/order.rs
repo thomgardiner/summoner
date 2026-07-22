@@ -298,7 +298,7 @@ fn policy_problems(
         problems.push("trusted policy requires an independent reviewer".to_string());
     }
     if let (Some(reviewer), Some(executor)) = (reviewer.as_deref(), order.executor_name(config)) {
-        if policy.distinct_reviewer && reviewer == executor {
+        if policy.distinct_reviewer_name && reviewer == executor {
             problems.push(format!(
                 "trusted policy requires a reviewer distinct from executor {executor:?}"
             ));
@@ -324,18 +324,18 @@ fn policy_problems(
             policy.allowed_executors.join(", ")
         ));
     }
-    if !policy.required_profiles.is_empty() {
+    if !policy.allowed_profiles.is_empty() {
         let profile = order
             .verify_profile
             .clone()
             .or_else(|| config.default_verify_profile.clone());
         let allowed = profile
             .as_deref()
-            .is_some_and(|name| policy.required_profiles.iter().any(|p| p == name));
+            .is_some_and(|name| policy.allowed_profiles.iter().any(|p| p == name));
         if !allowed {
             problems.push(format!(
                 "trusted policy requires a verify_profile from [{}], got {}",
-                policy.required_profiles.join(", "),
+                policy.allowed_profiles.join(", "),
                 profile.as_deref().unwrap_or("none")
             ));
         }
@@ -961,8 +961,8 @@ acceptance = ["tests pass"]
         );
         config.trusted_policy = Some(crate::config::TrustedPolicy {
             require_reviewer: true,
-            distinct_reviewer: true,
-            required_profiles: vec!["full".into()],
+            distinct_reviewer_name: true,
+            allowed_profiles: vec!["full".into()],
             allowed_executors: vec!["fake".into()],
             allowed_reviewers: vec!["judge".into()],
             protected_paths: Vec::new(),

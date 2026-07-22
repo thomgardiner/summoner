@@ -14,7 +14,7 @@ Repo config can't grant that.
 ## Trusted policy
 
 Optional `[trusted_policy]` in config declares the run's acceptance bar:
-`require_reviewer`, `distinct_reviewer`, `required_profiles`,
+`require_reviewer`, `distinct_reviewer_name`, `allowed_profiles`,
 `allowed_executors`, `allowed_reviewers`, `protected_paths`,
 `completed_satisfies_dependencies`. Orders that violate it fail validation
 before any worktree is spent.
@@ -45,7 +45,11 @@ its dependencies' `candidate_commit`s, so their code is present without naming
 a base by hand. One dependency is inherited directly; several are merged with
 `git merge-tree`, which computes the merge without a worktree. Dependencies that
 conflict skip the dependent and name the conflicting paths, rather than starting
-an executor on a tree missing half its inputs.
+an executor on a tree missing half its inputs. A dependency that finished
+without a candidate commit also skips the dependent: there is nothing safe to
+build on. An explicit `base` overrides the derivation, but is refused when it
+does not contain a dependency's candidate, because the order would wait for
+work it then builds without.
 
 The verified commit is used rather than the deterministic branch name, because
 releasing a worktree can salvage dirty state into a new commit and move the
@@ -61,9 +65,12 @@ Each run directory holds:
   write failure stops dispatch.
 - `report.json`: projected from terminal journal records after `run_finished`.
   A hard-killed run has no report, correctly. Each order records
-  `candidate_commit`, the exact commit captured in the worktree before release.
-  Release may salvage dirty state into a new commit and advance the branch, so
-  the branch name alone does not identify what was verified and reviewed.
+  `candidate_commit`, the exact commit captured in the worktree before release,
+  and only when the tree is clean: verification accepts uncommitted work, so a
+  dirty candidate is HEAD plus a delta no commit names, and recording HEAD
+  would misidentify it. Release may salvage dirty state into a new commit and
+  advance the branch, so the branch name alone never identifies what was
+  reviewed either.
 
 `resume <run-id>` replays from the manifest and journal, not order files.
 Different executor path or digest: refused. Carried forward: `verified` and

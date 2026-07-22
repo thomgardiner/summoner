@@ -59,10 +59,14 @@ pub struct Config {
 pub struct TrustedPolicy {
     /// Every order must carry an independent reviewer; `reviewer = "none"` is refused.
     pub require_reviewer: bool,
-    /// The reviewer backend must differ from the order's executor backend.
-    pub distinct_reviewer: bool,
-    /// Orders must verify with one of these grove profiles.
-    pub required_profiles: Vec<String>,
+    /// The reviewer's configured name must differ from the executor's. This
+    /// compares names, nothing deeper: two aliases invoking the same binary
+    /// and model satisfy it. Independence beyond the name needs provenance-
+    /// or model-level identity, which backends do not yet declare.
+    pub distinct_reviewer_name: bool,
+    /// Orders must select their verify_profile from this list (one-of
+    /// allowlist). It does not make every listed profile run.
+    pub allowed_profiles: Vec<String>,
     /// Closed set of executor names orders may use; empty allows any configured.
     pub allowed_executors: Vec<String>,
     /// Closed set of reviewer names; empty allows any configured.

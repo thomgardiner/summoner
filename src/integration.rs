@@ -33,6 +33,14 @@ pub enum Base {
         right: String,
         paths: Vec<String>,
     },
+    /// A dependency finished without an immutable candidate commit (it left
+    /// uncommitted work, or predates candidate recording), so there is nothing
+    /// safe for this order to build on. Starting anyway would run the executor
+    /// on a tree silently missing part of its declared inputs.
+    MissingCandidate { id: String },
+    /// The declared base does not contain a dependency's candidate, so the
+    /// order would wait for work it then builds without.
+    ExcludedDependency { id: String, base: String },
 }
 
 impl Base {
@@ -41,7 +49,8 @@ impl Base {
         match self {
             Base::Declared(base) => base.as_deref(),
             Base::Inherited { commit, .. } | Base::Merged { commit, .. } => Some(commit),
-            Base::Conflicted { .. } => None,
+            Base::Conflicted { .. } | Base::MissingCandidate { .. } => None,
+            Base::ExcludedDependency { .. } => None,
         }
     }
 
@@ -61,6 +70,15 @@ impl Base {
                  land them in one order or give this order an explicit base",
                 paths.join(", ")
             )),
+            Base::MissingCandidate { id } => Some(format!(
+                "dependency {id:?} finished without an immutable candidate commit \
+                 (uncommitted work, or a run recorded before candidate commits); \
+                 nothing safe to build on"
+            )),
+            Base::ExcludedDependency { id, base } => Some(format!(
+                "declared base {base:?} does not contain dependency {id:?}'s \
+                 candidate; the order would wait for work it then builds without"
+            )),
         }
     }
 }
@@ -70,7 +88,13 @@ fn short(commit: &str) -> &str {
 }
 
 /// Resolve the base for `order`, given the verified commit of each finished
-/// dependency. An explicit `base` always wins: the orchestrator asked for it.
+/// dependency (the scheduler dispatches only after every dependency reached a
+/// satisfying outcome, so an id absent from `landed` finished WITHOUT a
+/// candidate commit — it is not merely unfinished).
+///
+/// An explicit `base` wins, but only after proving it contains every
+/// dependency's candidate: `after` is a dataflow edge, and a base that
+/// excludes a dependency turns it back into mere ordering silently.
 pub fn resolve(
     repo: &Path,
     explicit: Option<&str>,
@@ -78,14 +102,31 @@ pub fn resolve(
     landed: &BTreeMap<String, String>,
 ) -> Result<Base> {
     if let Some(base) = explicit {
+        // Unresolvable here just means the ref is not visible yet; worktree
+        // acquisition is the authority on whether it exists at all. Only this
+        // order's own dependencies are checked, and only those that recorded a
+        // candidate: with an explicit base, a dependency without one is a pure
+        // ordering edge, which is exactly the legacy contract.
+        if let Ok(base_commit) = rev_parse(repo, base) {
+            for id in after {
+                let Some(commit) = landed.get(id) else {
+                    continue;
+                };
+                if !is_ancestor(repo, commit, &base_commit)? {
+                    return Ok(Base::ExcludedDependency {
+                        id: id.clone(),
+                        base: base.to_string(),
+                    });
+                }
+            }
+        }
         return Ok(Base::Declared(Some(base.to_string())));
     }
-    // A dependency with no recorded commit contributed no code to build on
-    // (it may have been carried, or produced nothing); skip rather than fail.
     let mut inherited: Vec<(&String, &String)> = Vec::new();
     for id in after {
-        if let Some(commit) = landed.get(id) {
-            inherited.push((id, commit));
+        match landed.get(id) {
+            Some(commit) => inherited.push((id, commit)),
+            None => return Ok(Base::MissingCandidate { id: id.clone() }),
         }
     }
     match inherited.as_slice() {
@@ -174,6 +215,22 @@ fn merge(
     Ok(Ok(String::from_utf8_lossy(&commit.stdout)
         .trim()
         .to_string()))
+}
+
+fn rev_parse(repo: &Path, reference: &str) -> Result<String> {
+    let output = git(
+        repo,
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+    )?;
+    if !output.status.success() {
+        bail!("unresolvable reference {reference:?}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let output = git(repo, &["merge-base", "--is-ancestor", ancestor, descendant])?;
+    Ok(output.status.success())
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<std::process::Output> {

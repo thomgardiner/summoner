@@ -169,10 +169,10 @@ jobs:
       - name: Smoke installed binary (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: 'test "$("${{ runner.temp }}/summoner-install/bin/summoner" --version)" = "summoner 0.1.0"'
+        run: 'test "$("${{ runner.temp }}/summoner-install/bin/summoner" --version)" = "summoner 0.2.0"'
       - name: Smoke installed binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $version = & "${{ runner.temp }}/summoner-install/bin/summoner.exe" --version
-          if ($version -ne "summoner 0.1.0") { throw "unexpected version: $version" }
+          if ($version -ne "summoner 0.2.0") { throw "unexpected version: $version" }

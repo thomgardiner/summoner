@@ -241,10 +241,15 @@ fn order(root: &Path, start_head: &str, record: &ManifestOrder) -> Result<Order>
         reviewer: Some(roles.reviewer.clone().unwrap_or_else(|| "none".into())),
         timeout_secs: expanded.timeout_secs,
         max_tokens: expanded.max_tokens,
-        base: expanded
-            .base
-            .clone()
-            .or_else(|| expanded.branch.is_none().then(|| start_head.to_string())),
+        // Pinning the recorded start keeps a resumed order reproducible when
+        // the default branch has moved — but only for orders with no
+        // dependencies. An `after` order derives its base from its
+        // dependencies' candidate commits at dispatch, and an explicit base
+        // outranks that derivation, so synthesizing one here would silently
+        // disconnect a resumed dependent from the work it depends on.
+        base: expanded.base.clone().or_else(|| {
+            (expanded.branch.is_none() && expanded.after.is_empty()).then(|| start_head.to_string())
+        }),
         branch: expanded.branch.clone(),
         after: expanded.after.clone(),
         variants: Vec::new(),
@@ -351,5 +356,53 @@ mod tests {
         );
         assert_eq!(bound.provenance, Some(captured.provenance));
         assert_eq!(bound.resume_provenance, captured.resume_provenance);
+    }
+
+    fn replay_record(id: &str, after: &[&str]) -> ManifestOrder {
+        ManifestOrder {
+            source_path: format!("/repo/{id}.toml"),
+            source_text: format!("id = \"{id}\"\n"),
+            expanded: ExpandedOrder {
+                id: id.into(),
+                title: "t".into(),
+                brief: "b".into(),
+                scope: vec!["src".into()],
+                acceptance: vec![],
+                verify_profile: None,
+                executor: None,
+                reviewer: None,
+                timeout_secs: None,
+                max_tokens: None,
+                base: None,
+                branch: None,
+                after: after.iter().map(|s| s.to_string()).collect(),
+                claim_group: None,
+                variant_of: None,
+            },
+            roles: Some(Roles {
+                executor: "fake".into(),
+                reviewer: None,
+            }),
+        }
+    }
+
+    /// The resume regression from the round-four review: replay pins the run's
+    /// start commit as the base of independent orders (reproducibility when
+    /// the default branch has moved), but must NEVER synthesize one for an
+    /// `after` order — an explicit base outranks dependency inheritance, so a
+    /// synthesized base would silently disconnect a resumed dependent from the
+    /// work it depends on.
+    #[test]
+    fn replay_pins_start_head_only_for_orders_without_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let independent = order(dir.path(), "abc123", &replay_record("solo", &[])).unwrap();
+        assert_eq!(independent.base.as_deref(), Some("abc123"));
+
+        let dependent = order(dir.path(), "abc123", &replay_record("child", &["solo"])).unwrap();
+        assert_eq!(
+            dependent.base, None,
+            "a resumed dependent must derive its base from its dependencies"
+        );
+        assert_eq!(dependent.after, vec!["solo".to_string()]);
     }
 }

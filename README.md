@@ -10,12 +10,12 @@ pile of transcripts.
 Summoner requires [Grove](https://github.com/thomgardiner/grove). Install both:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/grove/releases/download/v0.3.4/grove-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/grove/releases/download/v0.3.5/grove-installer.sh | sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.sh | sh
 ```
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/grove/releases/download/v0.3.4/grove-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/grove/releases/download/v0.3.5/grove-installer.ps1 | iex"
 powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.ps1 | iex"
 ```
 
@@ -64,7 +64,7 @@ way dispatch will and reports conflicts, couplings, and execution waves.
 | `verify_profile` | no | Grove profile to run before finishing. |
 | `executor`, `reviewer` | no | Configured names; `reviewer = "none"` opts out. |
 | `timeout_secs`, `base`, `branch` | no | Passed through to grove. |
-| `after` | no | Ordering only. To build on a dependency, also set `base = "grove/smn-<dep-id>"`. |
+| `after` | no | Order ids that must finish first. Supplies the base too: the dependent branches from its dependencies' verified commits (several are merged; conflicts skip the order). An explicit `base` overrides, but must contain every dependency's candidate. |
 | `variants` | no | N-version dispatch: one sibling per executor, orchestrator picks the winner. |
 
 ## Executors

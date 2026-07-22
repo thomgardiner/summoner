@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.0 — unreleased
+
+Requires Grove 0.3.5 (task record schema 6, the `edit` exec capability, and
+pinned verification policy).
+
+### Changed
+
+- `after` now supplies the base as well as the ordering: a dependent branches
+  from its dependencies' verified candidate commits, merged when there are
+  several. Conflicting dependencies skip the dependent with the paths named.
+  An explicit `base` still overrides, but is refused when it does not contain a
+  dependency's candidate. Previously `after` only ordered dispatch and building
+  on a dependency required hand-writing `base = "grove/smn-<dep-id>"`.
+- Executors launch under `grove task exec --capability edit`, so a fleet is no
+  longer throttled to `max_builders` live sessions.
+- An order that finishes with uncommitted work records no `candidate_commit`:
+  HEAD does not identify a dirty candidate, and dependents refuse to build on a
+  dependency without an immutable candidate rather than silently missing work.
+- Resume no longer pins the run's start commit as the base of an `after`
+  order, which silently disabled dependency inheritance on replay.
+
+### Added
+
+- Optional `[trusted_policy]` in the operator's global config: required
+  reviewer, reviewer distinct from executor by name, allowed executors,
+  reviewers, and profiles, protected paths, and whether unverified `completed`
+  work satisfies dependency edges. Content-addressed into the manifest, review
+  prompt, and report; a resumed run is gated by the recorded policy.
+- `candidate_commit` in each order report: the exact commit reviewed, captured
+  before worktree release can salvage and advance the branch.
+
 ## 0.1.0 — 2026-07-21
 
 ### Added

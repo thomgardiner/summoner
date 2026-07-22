@@ -38,10 +38,29 @@ pub(crate) fn finalize(
     // The last moment the reviewed candidate is identifiable: release may
     // salvage dirty state into a fresh commit and move the branch, after which
     // the branch name no longer names what was verified and reviewed.
-    report.candidate_commit = git(worktree, &["rev-parse", "HEAD"])
-        .ok()
-        .map(|oid| oid.trim().to_string())
-        .filter(|oid| !oid.is_empty());
+    //
+    // HEAD is that identity only when the tree is clean. Verification and
+    // review accept staged, unstaged, and untracked work, so a dirty tree
+    // means the reviewed candidate is HEAD plus a delta no commit names yet.
+    // Recording HEAD anyway would hand dependents a tree silently missing that
+    // delta — worse than recording nothing, which makes dependents refuse.
+    report.candidate_commit = match git(worktree, &["status", "--porcelain"]) {
+        Ok(status) if status.trim().is_empty() => git(worktree, &["rev-parse", "HEAD"])
+            .ok()
+            .map(|oid| oid.trim().to_string())
+            .filter(|oid| !oid.is_empty()),
+        _ => {
+            report.detail = Some(match report.detail.take() {
+                Some(detail) => format!(
+                    "{detail}; uncommitted work at finish, so no candidate commit was recorded"
+                ),
+                None => {
+                    "uncommitted work at finish, so no candidate commit was recorded".to_string()
+                }
+            });
+            None
+        }
+    };
     if let Some(path) = &report.stdout_log {
         report.stdout_tail = executor::tail(Path::new(path), TAIL_BYTES);
     }
