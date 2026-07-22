@@ -33,6 +33,12 @@ artifacts="${scratch}/artifacts"
 mkdir -p "${artifacts}"
 cp target/distrib/summoner-installer.sh "${artifacts}/" 2>/dev/null || cp target/distrib/*/summoner-installer.sh "${artifacts}/"
 cp "target/distrib/summoner-${host}.tar.xz" "target/distrib/summoner-${host}.tar.xz.sha256" "${artifacts}/"
+# The installer also fetches the updater beside the archive. Staging an
+# incomplete set makes the installer 404, which previously went unnoticed only
+# because a leftover server from an earlier run still had the full set.
+if [ -f "target/distrib/summoner-${host}-update" ]; then
+  cp "target/distrib/summoner-${host}-update" "${artifacts}/"
+fi
 (cd "${artifacts}" && shasum -a 256 summoner-*.tar.xz source.tar.gz 2>/dev/null | sed 's/  / */' > sha256.sum) || \
   (cd "${artifacts}" && shasum -a 256 summoner-*.tar.xz | sed 's/  / */' > sha256.sum)
 
