@@ -98,7 +98,7 @@ pub fn health(argv: &[String]) -> std::result::Result<(), String> {
     let Some(binary) = argv.first() else {
         return Err("empty diagnostic command".to_string());
     };
-    let program = locate(binary).map_or_else(|| Path::new(binary).to_path_buf(), |path| path);
+    let program = locate(binary).unwrap_or_else(|| Path::new(binary).to_path_buf());
     let mut child = Command::new(&program)
         .args(&argv[1..])
         .stdin(Stdio::null())
