@@ -647,10 +647,27 @@ acceptance = ["tests pass"]
     #[test]
     fn missing_default_executor_is_a_problem() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_order(dir.path(), "a.toml", GOOD_TOML);
+        // Path scope (not crate:) so auto-git host resolution doesn't surface
+        // a crate:-on-git problem ahead of the executor check under test.
+        let path = write_order(
+            dir.path(),
+            "a.toml",
+            r#"
+id = "auth-fix"
+title = "Fix token validation"
+brief = "Do the thing."
+scope = ["src/auth.rs"]
+acceptance = ["tests pass"]
+"#,
+        );
         let orders = load(&[path]).unwrap();
         let problems = validate(&orders, &config_with(None, &[]));
-        assert!(problems[0].contains("no executor named and no default_executor"));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("no executor named and no default_executor")),
+            "problems={problems:?}"
+        );
     }
 
     #[test]

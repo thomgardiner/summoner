@@ -99,7 +99,7 @@ fn wait_with_timeout(
     }
 }
 
-fn kill_tree(child: &Child) {
+fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
         let pid = child.id() as i32;
