@@ -1,8 +1,8 @@
 //! Setup / onboarding integration tests.
 #[path = "setup_support/mod.rs"]
 mod support;
-use support::*;
 use serde_json::Value;
+use support::*;
 
 #[test]
 fn doctor_runs_fake_bounded_diagnostics_for_the_selected_lifecycle() {
@@ -33,7 +33,6 @@ fn doctor_runs_fake_bounded_diagnostics_for_the_selected_lifecycle() {
     );
 }
 
-
 #[test]
 fn unknown_auth_requires_persisted_or_cli_acknowledgement() {
     let fixture = Fixture::new();
@@ -58,7 +57,6 @@ fn unknown_auth_requires_persisted_or_cli_acknowledgement() {
     success(fixture.run(&["--allow-unknown-auth", "doctor"]));
 }
 
-
 #[test]
 fn malformed_existing_config_is_a_usage_error() {
     let fixture = Fixture::new();
@@ -68,7 +66,6 @@ fn malformed_existing_config_is_a_usage_error() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("parsing"));
 }
-
 
 #[test]
 fn malformed_config_is_rejected_before_example_touches_the_repo() {
@@ -100,7 +97,6 @@ fn malformed_config_is_rejected_before_example_touches_the_repo() {
     }
 }
 
-
 #[test]
 fn doctor_without_default_is_actionable_and_non_green() {
     let fixture = Fixture::new();
@@ -125,5 +121,3 @@ fn doctor_without_default_is_actionable_and_non_green() {
             .is_some_and(|step| step.contains("init --global --preset codex"))
     }));
 }
-
-

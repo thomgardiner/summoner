@@ -70,7 +70,6 @@ fn sigterm_tears_down_the_fleet_and_still_emits_a_partial_report() {
     assert!(!Path::new(worktree).exists(), "worktree released");
 }
 
-
 #[test]
 fn streamed_run_emits_ndjson_events_and_a_final_report_line() {
     require_grove();
@@ -135,7 +134,6 @@ fn streamed_run_emits_ndjson_events_and_a_final_report_line() {
     assert!(!sidecar.contains("\"event\":\"report\""));
 }
 
-
 #[test]
 fn branch_switching_executor_downgrades_success_to_error() {
     require_grove();
@@ -174,5 +172,3 @@ verify_profile = "fast"
         "leaked worktree still on disk"
     );
 }
-
-

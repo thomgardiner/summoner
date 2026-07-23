@@ -64,7 +64,6 @@ variants = ["fake", "fake2"]
     }
 }
 
-
 #[test]
 fn resume_carries_successes_and_reruns_failures_on_their_branches() {
     require_grove();
@@ -130,7 +129,6 @@ fn resume_carries_successes_and_reruns_failures_on_their_branches() {
     assert_resume_carry_report(&fixture, &second);
 }
 
-
 fn assert_resume_carry_report(fixture: &Fixture, second: &Value) {
     assert_eq!(second["summary"]["verified"], 2, "{second}");
     let good = second["orders"]
@@ -187,7 +185,6 @@ fn assert_resume_carry_report(fixture: &Fixture, second: &Value) {
     }
 }
 
-
 #[test]
 fn resume_fails_closed_when_the_recorded_executor_binary_drifts() {
     require_grove();
@@ -213,5 +210,3 @@ fn resume_fails_closed_when_the_recorded_executor_binary_drifts() {
     assert!(error.contains("executor binary drift"), "{error}");
     assert!(error.contains("start a new run"), "{error}");
 }
-
-

@@ -50,7 +50,6 @@ fn run_token_budget_skips_the_rest_of_the_queue() {
     );
 }
 
-
 #[test]
 fn fail_fast_skips_the_remaining_queue_after_the_threshold() {
     require_grove();
@@ -98,7 +97,6 @@ fn fail_fast_skips_the_remaining_queue_after_the_threshold() {
     );
 }
 
-
 #[test]
 fn usage_marker_records_tokens_per_order_and_per_run() {
     require_grove();
@@ -121,7 +119,6 @@ fn usage_marker_records_tokens_per_order_and_per_run() {
 /// cache or paying to write it cold. The fake executor emits the real envelope
 /// shape, including the per-turn `usage.iterations` copy whose smaller numbers
 /// must NOT be what lands in the report — only the cumulative top-level count.
-
 
 #[test]
 fn cache_split_is_read_from_the_claude_json_envelope() {
@@ -152,7 +149,6 @@ fn cache_split_is_read_from_the_claude_json_envelope() {
 /// silent hole in budget accounting is exactly what this warning exists to
 /// prevent.
 
-
 #[test]
 fn an_unmatched_usage_marker_warns_on_the_verified_path() {
     require_grove();
@@ -182,5 +178,3 @@ fn an_unmatched_usage_marker_warns_on_the_verified_path() {
         "the unmatched-marker warning must survive to the report: {entry}"
     );
 }
-
-

@@ -1,8 +1,8 @@
 //! Setup / onboarding integration tests.
 #[path = "setup_support/mod.rs"]
 mod support;
-use support::*;
 use serde_json::Value;
+use support::*;
 
 #[test]
 fn one_command_onboards_each_explicit_preset_and_prints_next_steps() {
@@ -39,7 +39,6 @@ fn one_command_onboards_each_explicit_preset_and_prints_next_steps() {
     }
 }
 
-
 #[test]
 fn one_command_onboarding_is_idempotent() {
     let fixture = Fixture::new();
@@ -73,7 +72,6 @@ fn one_command_onboarding_is_idempotent() {
     }
 }
 
-
 #[test]
 fn one_command_refuses_a_preset_conflict_before_touching_the_repo() {
     let fixture = Fixture::new();
@@ -96,7 +94,6 @@ fn one_command_refuses_a_preset_conflict_before_touching_the_repo() {
         assert!(!fixture.repo.join(relative).exists(), "created {relative}");
     }
 }
-
 
 #[test]
 fn presets_append_preserve_and_remain_idempotent_through_the_cli() {
@@ -153,7 +150,6 @@ fn presets_append_preserve_and_remain_idempotent_through_the_cli() {
     assert_eq!(names, ["codex", "codex-review"]);
 }
 
-
 #[test]
 fn generated_example_checks_plans_and_selects_real_rust_verification() {
     let fixture = Fixture::new();
@@ -190,7 +186,6 @@ fn generated_example_checks_plans_and_selects_real_rust_verification() {
     // Notes may list harness skills / host notices; they must not fail the bar.
 }
 
-
 #[test]
 fn failed_lock_generation_rolls_back_owned_profile_and_retry_succeeds() {
     let fixture = Fixture::new();
@@ -226,7 +221,6 @@ fn failed_lock_generation_rolls_back_owned_profile_and_retry_succeeds() {
     assert!(fixture.repo.join("Cargo.lock").is_file());
 }
 
-
 #[test]
 fn example_does_not_generate_a_lock_for_user_owned_grove_config() {
     let fixture = Fixture::new();
@@ -238,5 +232,3 @@ fn example_does_not_generate_a_lock_for_user_owned_grove_config() {
     success(fixture.run(&["init", "--example"]));
     assert!(!fixture.repo.join("Cargo.lock").exists());
 }
-
-

@@ -63,7 +63,6 @@ base = "grove/smn-one"
     assert!(show.status.success(), "src/one.rs missing on smn-two");
 }
 
-
 #[test]
 fn dependents_of_a_failed_order_are_skipped() {
     require_grove();
@@ -116,7 +115,6 @@ after = ["one"]
     // The skipped order never began a task: only one grove task exists.
     assert_eq!(fixture.task_states().len(), 1);
 }
-
 
 #[test]
 fn a_dependent_order_inherits_its_dependency_without_an_explicit_base() {
@@ -181,7 +179,6 @@ after = ["first"]
 /// immutable candidate, so it records no candidate commit and its dependent
 /// refuses to start rather than building on a tree missing that work. HEAD
 /// alone must never be presented as the identity of a dirty candidate.
-
 
 #[test]
 fn a_dirty_upstream_records_no_candidate_and_its_dependent_refuses() {
@@ -249,4 +246,3 @@ after = ["dirty"]
         "never dispatched: {downstream}"
     );
 }
-

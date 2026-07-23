@@ -34,7 +34,10 @@ jobs:
         with:
           tool: nextest@0.9.140
           fallback: none
-      - run: cargo nextest run --locked --no-tests fail --bins --test setup --test init_atomic
+      - run: >
+          cargo nextest run --locked --no-tests fail --bins
+          --test setup_onboard --test setup_doctor --test setup_gates
+          --test init_atomic
 
   fleet:
     runs-on: ${{ matrix.os }}
@@ -130,7 +133,12 @@ jobs:
         run: cargo nextest run --locked --no-tests fail --test init_atomic
       - name: Run complete Unix fleet suite
         if: runner.os != 'Windows'
-        run: cargo nextest run --locked --no-tests fail --test fleet
+        # fleet.rs was split into themed crates; fleet_lifecycle already ran above.
+        run: >
+          cargo nextest run --locked --no-tests fail
+          --test fleet_deps --test fleet_failures --test fleet_limits
+          --test fleet_plan --test fleet_recovery --test fleet_resume
+          --test fleet_review --test fleet_signals --test fleet_verify
 
   distribution:
     needs: quality

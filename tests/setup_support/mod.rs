@@ -106,7 +106,6 @@ exit /b 0"#,
     }
 }
 
-
 pub fn success(output: Output) {
     assert!(
         output.status.success(),

@@ -83,7 +83,6 @@ variants = ["fake", "fake2"]
     );
 }
 
-
 #[test]
 fn plan_refutes_a_batch_then_passes_it_once_revised() {
     require_grove();
@@ -197,5 +196,3 @@ fn plan_refutes_a_batch_then_passes_it_once_revised() {
         }
     }
 }
-
-

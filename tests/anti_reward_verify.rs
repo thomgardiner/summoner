@@ -200,5 +200,3 @@ scope = ["src/lib.txt"]
         "no required profiles → completed, not verified\nreport={report}"
     );
 }
-
-

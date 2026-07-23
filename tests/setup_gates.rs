@@ -32,7 +32,6 @@ fn run_refuses_a_missing_executor_before_dispatch() {
     assert!(stderr.contains("definitely-not-installed-summoner-test-binary"));
 }
 
-
 #[test]
 fn run_refuses_missing_verification_profile_before_dispatch() {
     let fixture = Fixture::new();
@@ -47,7 +46,6 @@ fn run_refuses_missing_verification_profile_before_dispatch() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("not defined"));
 }
-
 
 #[test]
 fn run_refuses_missing_git_identity_before_dispatch() {
@@ -75,4 +73,3 @@ fn run_refuses_missing_git_identity_before_dispatch() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-

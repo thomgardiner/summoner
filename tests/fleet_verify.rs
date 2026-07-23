@@ -39,7 +39,6 @@ acceptance = ["src/lib.rs gains a function", "work is committed"]
 verify_profile = "fast"
 "#;
 
-
 #[test]
 fn happy_path_order_is_verified_released_and_salvaged_to_its_branch() {
     require_grove();
@@ -113,7 +112,6 @@ fn happy_path_order_is_verified_released_and_salvaged_to_its_branch() {
     assert_eq!(stats["outcomes"]["verified"], 1, "{board}");
 }
 
-
 #[test]
 fn clean_executor_exit_without_changes_is_not_verified() {
     require_grove();
@@ -135,7 +133,6 @@ fn clean_executor_exit_without_changes_is_not_verified() {
     );
     assert!(entry.get("verify").is_none(), "{report}");
 }
-
 
 #[test]
 fn executor_declaring_unmet_acceptance_is_not_verified() {
@@ -161,7 +158,6 @@ fn executor_declaring_unmet_acceptance_is_not_verified() {
     assert!(entry.get("verify").is_none(), "{report}");
 }
 
-
 #[test]
 fn verifier_created_ignored_artifacts_do_not_block_release() {
     require_grove();
@@ -183,7 +179,6 @@ fn verifier_created_ignored_artifacts_do_not_block_release() {
     assert_eq!(entry["outcome"], "verified", "{report}");
     assert!(!Path::new(entry["worktree"].as_str().unwrap()).exists());
 }
-
 
 #[test]
 fn executor_created_ignored_artifacts_remain_protected() {
@@ -213,7 +208,6 @@ fn executor_created_ignored_artifacts_remain_protected() {
         "private\n"
     );
 }
-
 
 #[test]
 fn internal_error_after_commit_preserves_report_evidence() {
@@ -254,7 +248,6 @@ fn internal_error_after_commit_preserves_report_evidence() {
         "{report}"
     );
 }
-
 
 #[test]
 fn two_independent_orders_run_in_one_fleet_and_both_verify() {
@@ -298,4 +291,3 @@ verify_profile = "fast"
     assert_eq!(states.len(), 2);
     assert!(states.iter().all(|(_, status)| status == "finished"));
 }
-

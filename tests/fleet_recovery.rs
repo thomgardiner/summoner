@@ -121,7 +121,6 @@ fn hard_kill_after_grove_finish_recovers_without_report_or_source_order() {
     assert_eq!(resumed_manifest["orders"][0]["expanded"]["id"], "recover");
 }
 
-
 #[test]
 fn resume_refuses_to_duplicate_a_nonterminal_grove_task() {
     require_grove();
@@ -199,7 +198,6 @@ fn resume_refuses_to_duplicate_a_nonterminal_grove_task() {
     );
 }
 
-
 #[test]
 fn resume_fails_closed_when_green_journal_evidence_contradicts_grove() {
     require_grove();
@@ -249,7 +247,6 @@ fn resume_fails_closed_when_green_journal_evidence_contradicts_grove() {
         "{error}"
     );
 }
-
 
 #[test]
 fn resume_rejects_an_approval_bound_to_a_different_grove_source() {
@@ -341,4 +338,3 @@ fn resume_rejects_an_approval_bound_to_a_different_grove_source() {
         "{error}"
     );
 }
-

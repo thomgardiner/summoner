@@ -37,7 +37,6 @@ scope = ["src"]
     );
 }
 
-
 #[test]
 fn conflicting_scope_reports_blocked_without_dispatching() {
     require_grove();
@@ -59,7 +58,6 @@ fn conflicting_scope_reports_blocked_without_dispatching() {
     assert!(entry["task_id"].is_null(), "no task was begun");
 }
 
-
 #[test]
 fn sleeping_executor_is_stalled_by_the_grove_deadline_and_abandoned() {
     require_grove();
@@ -76,7 +74,6 @@ fn sleeping_executor_is_stalled_by_the_grove_deadline_and_abandoned() {
         [("smn-wave".into(), "abandoned".into())]
     );
 }
-
 
 #[test]
 fn failing_executor_skips_verification_and_is_abandoned() {
@@ -95,7 +92,6 @@ fn failing_executor_skips_verification_and_is_abandoned() {
         [("smn-wave".into(), "abandoned".into())]
     );
 }
-
 
 #[test]
 fn out_of_scope_write_is_a_scope_violation() {
@@ -122,5 +118,3 @@ fn out_of_scope_write_is_a_scope_violation() {
         [("smn-wave".into(), "abandoned".into())]
     );
 }
-
-
