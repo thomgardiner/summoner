@@ -1,1 +1,95 @@
-[]
+[
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T19:02:40Z",
+    "fingerprint": "9846c98944ca08a4f6161a79c5ec16e2f281d128c5c07094595e4b7610472f52",
+    "gate": "__config__",
+    "note": "summoner crucible adoption: pin judge config"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T19:02:40Z",
+    "checkerSha256": "33b5ac9960f6046101f171dfd6e186c57492c46177f6635c2a8d52a0438d14cd",
+    "fingerprint": "e18521e340b4210c0aa5eaa304fc6047f90d93e69d9b949645b9fe3534ef6bab",
+    "gate": "unit",
+    "note": "T1 gate oracle pin"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T19:02:40Z",
+    "checkerSha256": "d0173b36c5d06c9e61526859fdc08e0862b6125c3e94a4bf113f07a200cc83bf",
+    "fingerprint": "9d5ffc3ad5c0ac8d7a4c2ee59ad59be8614a134e0e5aca25df2556adf10c0921",
+    "gate": "host-honesty",
+    "note": "T1 gate oracle pin"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T19:02:40Z",
+    "checkerSha256": "83d84bfafa41d6807034d40d6d3c182efd0fd5a976109738018dabffb3264cc9",
+    "fingerprint": "87d514b0aeaa21818cb3e07a8aece4058c267ced99fa325ca09df14a166b8a78",
+    "gate": "tripwires",
+    "note": "T1 gate oracle pin"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T19:02:40Z",
+    "checkerSha256": "ffd3265f281e4bf4e05ed57b9e6e7648ffda3442c50e6e28a477bfa1b25a9433",
+    "fingerprint": "52b2727f6a8167e1863ba92034dfe22ea1e733249bb14466dcd1150e0a27038b",
+    "gate": "test-smells",
+    "note": "T1 gate oracle pin"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T19:03:05Z",
+    "checkerSha256": "d6f69d4097f1881271c86316fba0ee703fbcfce0cf9d32bd67860099705bb7c2",
+    "fingerprint": "843dc4e485cf2aa6e8601c8a5eacbd2dbca465789ae2629848a129c870242116",
+    "gate": "tripwires",
+    "note": "T1 gate oracle pin"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T19:03:05Z",
+    "fingerprint": "bde872012de519fdd521ffb2ef74ac7287b42f6226d03d546e1a75a88a0927f2",
+    "gate": "__config__",
+    "note": "pin judge config after gate digests"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T20:11:23Z",
+    "fingerprint": "bde872012de519fdd521ffb2ef74ac7287b42f6226d03d546e1a75a88a0927f2",
+    "gate": "__config__",
+    "note": "summoner host independence pin"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T20:11:23Z",
+    "checkerSha256": "33b5ac9960f6046101f171dfd6e186c57492c46177f6635c2a8d52a0438d14cd",
+    "fingerprint": "e18521e340b4210c0aa5eaa304fc6047f90d93e69d9b949645b9fe3534ef6bab",
+    "gate": "unit",
+    "note": "T1 gate oracle pin"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T20:11:23Z",
+    "checkerSha256": "d0173b36c5d06c9e61526859fdc08e0862b6125c3e94a4bf113f07a200cc83bf",
+    "fingerprint": "9d5ffc3ad5c0ac8d7a4c2ee59ad59be8614a134e0e5aca25df2556adf10c0921",
+    "gate": "host-honesty",
+    "note": "T1 gate oracle pin"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T20:11:23Z",
+    "checkerSha256": "d6f69d4097f1881271c86316fba0ee703fbcfce0cf9d32bd67860099705bb7c2",
+    "fingerprint": "843dc4e485cf2aa6e8601c8a5eacbd2dbca465789ae2629848a129c870242116",
+    "gate": "tripwires",
+    "note": "T1 gate oracle pin"
+  },
+  {
+    "approvedBy": "thomas",
+    "at": "2026-07-23T20:11:23Z",
+    "checkerSha256": "ffd3265f281e4bf4e05ed57b9e6e7648ffda3442c50e6e28a477bfa1b25a9433",
+    "fingerprint": "52b2727f6a8167e1863ba92034dfe22ea1e733249bb14466dcd1150e0a27038b",
+    "gate": "test-smells",
+    "note": "T1 gate oracle pin"
+  }
+]
