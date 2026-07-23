@@ -1942,20 +1942,32 @@ fn resume_rejects_an_approval_bound_to_a_different_grove_source() {
     let run_id = report["run_id"].as_str().unwrap();
 
     let wrapper = fixture.base.path().join("grove-wrong-source.sh");
+    // Rewrite every task status payload: match `task` + `status` regardless of
+    // flag order (`task status --json` or `task status --json <id>`).
     std::fs::write(
         &wrapper,
         r#"#!/bin/sh
-if [ "$1" = task ] && [ "$2" = status ]; then
-  "$SUMMONER_REAL_GROVE" "$@" > "$SUMMONER_STATUS_OUT" || exit $?
-  python3 - "$SUMMONER_STATUS_OUT" <<'PY'
+set -e
+is_status=0
+for arg in "$@"; do
+  if [ "$arg" = status ]; then is_status=1; fi
+done
+if [ "$1" = task ] && [ "$is_status" = 1 ]; then
+  out="$SUMMONER_STATUS_OUT"
+  "$SUMMONER_REAL_GROVE" "$@" > "$out"
+  python3 - "$out" <<'PY'
 import json, sys
-with open(sys.argv[1], encoding="utf-8") as source:
+path = sys.argv[1]
+with open(path, encoding="utf-8") as source:
     status = json.load(source)
-for task in status["tasks"]:
+tasks = status.get("tasks") or []
+if not tasks:
+    raise SystemExit("wrapper: no tasks in status to rebind")
+for task in tasks:
     task["source_sha256"] = "0" * 64
 json.dump(status, sys.stdout)
 PY
-  exit $?
+  exit 0
 fi
 exec "$SUMMONER_REAL_GROVE" "$@"
 "#,
@@ -1971,7 +1983,13 @@ exec "$SUMMONER_REAL_GROVE" "$@"
         )
         .output()
         .unwrap();
-    assert_eq!(resumed.status.code(), Some(2));
+    assert_eq!(
+        resumed.status.code(),
+        Some(2),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
     let error = String::from_utf8_lossy(&resumed.stderr);
     assert!(error.contains("approval snapshot"), "{error}");
     assert!(

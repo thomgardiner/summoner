@@ -547,6 +547,13 @@ mod tests {
     fn config_with(default: Option<&str>, backends: &[(&str, &[&str], PromptRouting)]) -> Config {
         let mut config = Config {
             default_executor: default.map(|s| s.to_string()),
+            // Explicit grove so unit tests using crate: scopes are not failed by
+            // auto-git resolve when the checkout has no grove on PATH (CI unit job).
+            host: Some(crate::config::HostSettings {
+                kind: Some("grove".into()),
+                bin: None,
+                worktree_root: None,
+            }),
             ..Config::default()
         };
         for (name, argv, routing) in backends {
