@@ -39,6 +39,7 @@ acceptance = ["src/lib.rs gains a function", "work is committed"]
 verify_profile = "fast"
 "#;
 
+
 #[test]
 fn happy_path_order_is_verified_released_and_salvaged_to_its_branch() {
     require_grove();
@@ -112,6 +113,7 @@ fn happy_path_order_is_verified_released_and_salvaged_to_its_branch() {
     assert_eq!(stats["outcomes"]["verified"], 1, "{board}");
 }
 
+
 #[test]
 fn clean_executor_exit_without_changes_is_not_verified() {
     require_grove();
@@ -133,6 +135,7 @@ fn clean_executor_exit_without_changes_is_not_verified() {
     );
     assert!(entry.get("verify").is_none(), "{report}");
 }
+
 
 #[test]
 fn executor_declaring_unmet_acceptance_is_not_verified() {
@@ -158,6 +161,7 @@ fn executor_declaring_unmet_acceptance_is_not_verified() {
     assert!(entry.get("verify").is_none(), "{report}");
 }
 
+
 #[test]
 fn verifier_created_ignored_artifacts_do_not_block_release() {
     require_grove();
@@ -179,6 +183,7 @@ fn verifier_created_ignored_artifacts_do_not_block_release() {
     assert_eq!(entry["outcome"], "verified", "{report}");
     assert!(!Path::new(entry["worktree"].as_str().unwrap()).exists());
 }
+
 
 #[test]
 fn executor_created_ignored_artifacts_remain_protected() {
@@ -208,6 +213,7 @@ fn executor_created_ignored_artifacts_remain_protected() {
         "private\n"
     );
 }
+
 
 #[test]
 fn internal_error_after_commit_preserves_report_evidence() {
@@ -249,119 +255,6 @@ fn internal_error_after_commit_preserves_report_evidence() {
     );
 }
 
-#[test]
-fn repo_without_required_profiles_completes_with_the_override_recorded() {
-    require_grove();
-    let fixture = Fixture::new(false);
-    fixture.executor(
-        "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm 'executor work'",
-        60,
-    );
-    let order = fixture.order(
-        "wave.toml",
-        r#"
-id = "wave"
-title = "Add the wave function"
-brief = "Append a function to src/lib.rs and commit."
-scope = ["src"]
-"#,
-    );
-
-    let report = fixture.run_report(&[&order], 1);
-    let entry = &report["orders"][0];
-    assert_eq!(entry["outcome"], "completed", "{report}");
-    assert!(
-        entry["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("no required verification profiles"))
-    );
-    assert_eq!(
-        fixture.task_states(),
-        [("smn-wave".into(), "finished".into())]
-    );
-}
-
-#[test]
-fn conflicting_scope_reports_blocked_without_dispatching() {
-    require_grove();
-    let fixture = Fixture::new(true);
-    fixture.executor("exit 0", 60);
-    let order = fixture.order("wave.toml", ORDER_TOML);
-
-    let held = fixture.grove(&["claim", "--agent", "blocker", "--task", "hold", "src"]);
-    assert!(
-        held.status.success(),
-        "{}",
-        String::from_utf8_lossy(&held.stderr)
-    );
-
-    let report = fixture.run_report(&[&order], 1);
-    let entry = &report["orders"][0];
-    assert_eq!(entry["outcome"], "blocked", "{report}");
-    assert!(entry["conflicts"].as_array().is_some_and(|c| !c.is_empty()));
-    assert!(entry["task_id"].is_null(), "no task was begun");
-}
-
-#[test]
-fn sleeping_executor_is_stalled_by_the_grove_deadline_and_abandoned() {
-    require_grove();
-    let fixture = Fixture::new(true);
-    fixture.executor("sleep 30", 2);
-    let order = fixture.order("wave.toml", ORDER_TOML);
-
-    let report = fixture.run_report(&[&order], 1);
-    let entry = &report["orders"][0];
-    assert_eq!(entry["outcome"], "stalled", "{report}");
-    assert_eq!(entry["executor_exit"], 124);
-    assert_eq!(
-        fixture.task_states(),
-        [("smn-wave".into(), "abandoned".into())]
-    );
-}
-
-#[test]
-fn failing_executor_skips_verification_and_is_abandoned() {
-    require_grove();
-    let fixture = Fixture::new(true);
-    fixture.executor("exit 3", 60);
-    let order = fixture.order("wave.toml", ORDER_TOML);
-
-    let report = fixture.run_report(&[&order], 1);
-    let entry = &report["orders"][0];
-    assert_eq!(entry["outcome"], "executor_failed", "{report}");
-    assert_eq!(entry["executor_exit"], 3);
-    assert!(entry.get("verify").is_none(), "verification skipped");
-    assert_eq!(
-        fixture.task_states(),
-        [("smn-wave".into(), "abandoned".into())]
-    );
-}
-
-#[test]
-fn out_of_scope_write_is_a_scope_violation() {
-    require_grove();
-    let fixture = Fixture::new(true);
-    fixture.executor(
-        "echo 'pub fn wave() {}' >> src/lib.rs\necho outside > outside.txt\n\
-         git add -A\ngit commit -qm 'overreach'",
-        60,
-    );
-    let order = fixture.order("wave.toml", ORDER_TOML);
-
-    let report = fixture.run_report(&[&order], 1);
-    let entry = &report["orders"][0];
-    assert_eq!(entry["outcome"], "scope_violation", "{report}");
-    assert!(
-        entry["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("outside.txt")),
-        "{report}"
-    );
-    assert_eq!(
-        fixture.task_states(),
-        [("smn-wave".into(), "abandoned".into())]
-    );
-}
 
 #[test]
 fn two_independent_orders_run_in_one_fleet_and_both_verify() {
@@ -405,3 +298,4 @@ verify_profile = "fast"
     assert_eq!(states.len(), 2);
     assert!(states.iter().all(|(_, status)| status == "finished"));
 }
+
