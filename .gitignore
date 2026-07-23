@@ -12,3 +12,4 @@ docs/retros/
 
 # Fleet order files are local orchestration, not product surface.
 /orders/
+examples/demo/.git/

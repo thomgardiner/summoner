@@ -93,12 +93,15 @@ impl Host for GitHost {
                 ".cargo/config.toml".into(),
             ]);
         }
+        // Exact-state holds only for a *clean committed* candidate: verify,
+        // review capsule, and finish all refuse a dirty worktree, then bind
+        // HEAD (see require_clean_candidate). This is not Grove's full
+        // workspace snapshot, but it closes the dirty-after-verify hole.
         HostCapabilities {
             supervised_exec: true,
             receipt_finish: true,
             cargo_topology: false,
             cow_lanes: false,
-            // Detached private worktree at the candidate commit for review.
             inspection_capsule: true,
             scope_includes_committed_delta: true,
             verification_bound_to_source: true,
@@ -285,6 +288,17 @@ impl Host for GitHost {
             self.verify.required.clone()
         };
 
+        // Dirty tree means verify could not have bound the bytes under HEAD.
+        if let Err(err) = require_clean_candidate(worktree) {
+            let _ = self.claims.release(task_id);
+            let _ = self.ledger.set_state(task_id, TaskState::Refused);
+            return Ok(FinishOutcome::Refused {
+                reason: "source_changed".into(),
+                outside_scope: vec![err.to_string()],
+                verification: None,
+            });
+        }
+
         let outside = outside_scope_paths(worktree, &rec)?;
         if !outside.is_empty() {
             let _ = self.claims.release(task_id);
@@ -297,7 +311,7 @@ impl Host for GitHost {
         }
 
         let head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
-        let head_digest = sha256_hex(head.as_bytes());
+        let head_digest = candidate_source_digest(worktree)?;
         if let Some(expected) = expected_source_sha256
             && expected != head_digest
         {
@@ -320,7 +334,7 @@ impl Host for GitHost {
         };
         // Profiles bound to a prior candidate become stale if HEAD moved.
         if let Some(bound) = rec.verify_source_commit.as_deref()
-            && bound != head
+            && bound != head.as_str()
         {
             for profile in verification.passed.drain(..) {
                 if !verification.stale.contains(&profile) {
@@ -420,6 +434,10 @@ impl Host for GitHost {
     fn verify(&self, worktree: &Path, profile: &str, task_id: &str) -> Result<VerifySummary> {
         let _ = self.ledger.set_state(task_id, TaskState::Verifying);
         let _ = self.claims.renew(task_id);
+        // Exact-state contract: only a clean committed tree may verify.
+        require_clean_candidate(worktree).with_context(|| {
+            format!("git host refuses verify on a dirty worktree (task {task_id})")
+        })?;
         let Some(prof) = self.verify.profiles.get(profile) else {
             // Missing profile is a hard miss, not a green checkmark.
             let mut rec = self.ledger.read(task_id)?;
@@ -473,16 +491,22 @@ impl Host for GitHost {
                 duration_ms: None,
             });
         }
+        // Re-check cleanliness: a verify command must not leave dirty state and
+        // still mint a green profile bound only to HEAD.
+        if passed {
+            require_clean_candidate(worktree).with_context(|| {
+                format!("verify profile {profile:?} left the worktree dirty; cannot bind HEAD")
+            })?;
+        }
         let mut rec = self.ledger.read(task_id)?;
         if passed {
             if !rec.verification.passed.contains(&profile.to_string()) {
                 rec.verification.passed.push(profile.into());
             }
             rec.verification.failed.retain(|p| p != profile);
-            // Bind the green profile to the exact HEAD that was verified.
             let head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
-            rec.verify_source_commit = Some(head.clone());
-            rec.verify_source_sha256 = Some(sha256_hex(head.as_bytes()));
+            rec.verify_source_commit = Some(head);
+            rec.verify_source_sha256 = Some(candidate_source_digest(worktree)?);
         } else if !rec.verification.failed.contains(&profile.to_string()) {
             rec.verification.failed.push(profile.into());
             rec.verification.passed.retain(|p| p != profile);
@@ -508,10 +532,11 @@ impl Host for GitHost {
         task_id: &str,
         _lease_secs: u64,
     ) -> Result<InspectionAcquire> {
-        // Private capsule: detached worktree pinned at the candidate commit so
-        // the reviewer cannot mutate the live executor worktree or amend HEAD.
+        // Private capsule: detached worktree pinned at the clean candidate commit.
+        require_clean_candidate(worktree)
+            .context("git host refuses review capsule on a dirty worktree")?;
         let head = git_out(worktree, &["rev-parse", "HEAD"]).context("capsule head")?;
-        let source_sha256 = sha256_hex(head.as_bytes());
+        let source_sha256 = candidate_source_digest(worktree)?;
         let capsule_id = format!("git-capsule-{task_id}");
         let capsule_path = self.state_root.join("capsules").join(&capsule_id);
         if capsule_path.exists() {
@@ -600,10 +625,10 @@ impl Host for GitHost {
         )?;
         let capsule_head = git_out(&capsule_path, &["rev-parse", "HEAD"]).unwrap_or_default();
         let live_head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
-        let source_sha256 = sha256_hex(live_head.as_bytes());
-        // Candidate on the live worktree must still be the bound commit; capsule
-        // must still be at that commit and clean (reviewer isolation).
-        let source_unchanged = source_sha256 == bound && live_head == bound_head;
+        let live_clean = require_clean_candidate(worktree).is_ok();
+        let live_digest = candidate_source_digest(worktree).unwrap_or_default();
+        // Live candidate must still be the bound clean HEAD; capsule must match.
+        let source_unchanged = live_clean && live_digest == bound && live_head == bound_head;
         let capsule_unchanged = capsule_head == bound_head && capsule_path.is_dir();
         let tree_clean = git_out(&capsule_path, &["status", "--porcelain"])
             .map(|s| s.trim().is_empty())
@@ -622,8 +647,6 @@ impl Host for GitHost {
             source_unchanged,
             capsule_unchanged,
             authorized,
-            // Review binding is the live candidate digest, not the capsule's
-            // detached HEAD string after a reviewer amends (which would diverge).
             source_sha256: bound,
             stdout: InspectionLog {
                 path: stdout_path,
@@ -753,4 +776,24 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// Git-host exact-state requires a clean worktree: no staged, unstaged, or
+/// untracked changes. Only then does binding HEAD equal the bytes verify saw.
+fn require_clean_candidate(worktree: &Path) -> Result<()> {
+    let status = git_out(worktree, &["status", "--porcelain"])?;
+    if !status.trim().is_empty() {
+        bail!(
+            "worktree is dirty; git host only verifies/finishes clean committed candidates. Commit or discard local changes first"
+        );
+    }
+    Ok(())
+}
+
+/// Digest used for finish CAS and review binding: sha256 of `commit\0tree`
+/// so both object ids must match. Only meaningful on a clean worktree.
+fn candidate_source_digest(worktree: &Path) -> Result<String> {
+    let commit = git_out(worktree, &["rev-parse", "HEAD"])?;
+    let tree = git_out(worktree, &["rev-parse", "HEAD^{tree}"])?;
+    Ok(sha256_hex(format!("{commit}\0{tree}").as_bytes()))
 }

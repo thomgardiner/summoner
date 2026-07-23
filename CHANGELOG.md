@@ -3,6 +3,16 @@
 All notable changes to Summoner are documented here. Summoner follows semantic
 versioning.
 
+## Unreleased
+
+### Fixed
+
+- Git host exact-state: verify/finish/review **refuse a dirty worktree**, so
+  dirty-after-verify can no longer mint `verified` against HEAD alone. Binding
+  digests use `commit\\0tree`. Land refuses a silent no-op aggregate gate
+  (set `SUMMONER_LAND_VERIFY`, provide `Cargo.toml`, or explicit
+  `SUMMONER_LAND_ALLOW_NO_AGGREGATE=1`). README documents Grove vs git assurance.
+
 ## 0.2.0 — 2026-07-23
 
 Requires Grove 0.4.0 (task record schema 6, task-status schema 4, the `edit`

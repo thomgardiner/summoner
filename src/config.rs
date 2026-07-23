@@ -97,8 +97,9 @@ pub struct TrustedPolicy {
     /// and model satisfy it when identity is unset.
     pub distinct_reviewer_name: bool,
     /// Require executor and reviewer to declare different `identity` strings
-    /// (provider/model provenance label). Both must set identity; equal values
-    /// refuse. Closes the two-aliases-same-model hole.
+    /// (operator-asserted provider/model labels, e.g. `openai:gpt-x`). Both
+    /// must set identity; equal values refuse. This is **not** cryptographic
+    /// model attestation — it stops silent same-label aliases, not spoofing.
     pub distinct_reviewer_identity: bool,
     /// Orders must select their verify_profile from this list (one-of
     /// allowlist). It does not make every listed profile run.

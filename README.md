@@ -4,20 +4,26 @@ A host-pluggable fleet runner for coding-agent CLIs. You write work orders;
 Summoner dispatches any configured model CLI into isolated worktrees, verifies
 and reviews each candidate, and hands back one ranked evidence report.
 
-**Hosts:** isolation is a plugin. The default path uses **git** worktrees and a
-local claim/task ledger (no Grove required on Unix). **[Grove](https://github.com/thomgardiner/grove)**
-is the optional depth host for Rust CoW build lanes, governor admission, and
-receipt-bound finish. Select with:
+**Hosts:** isolation is a plugin. Choose the host that matches the assurance
+you need — they are **not** equivalent.
+
+| | **Git host** | **Grove host** |
+| --- | --- | --- |
+| Isolation | git worktrees + local ledger | CoW worktrees + claims + governor |
+| Exact-state | **Clean committed** candidates only (dirty tree refuses verify/finish); detached review worktree | Workspace snapshot digests, inspection capsules, finish source CAS |
+| Verification | Profiles in Summoner `[verification]` | Profiles in `.grove.toml`, receipt-bound |
+| Default when | No `.grove.toml` / no `grove` on PATH (Unix) | Explicit `[host] kind = "grove"` or `.grove.toml` + `grove` |
+| High-assurance fleets | OK if clean commits + trusted policy | **Preferred** for multi-agent Rust monorepos |
 
 ```toml
 [host]
-kind = "git"    # independence (default when no .grove.toml / grove)
-# kind = "grove"
+kind = "grove"   # high-assurance (recommended for verified fleets)
+# kind = "git"   # independence; requires clean committed candidates
 # bin = "grove"
 ```
 
 Resolution: explicit `[host] kind` → legacy `grove_bin` → `.grove.toml` plus
-`grove` on `PATH` → else `git`.
+`grove` on `PATH` → else `git` (with a stderr notice that guarantees are weaker).
 
 ## Install
 
@@ -102,14 +108,21 @@ Most multi-agent tools give you isolation tiles. Summoner gives you a **process*
 scope claims, optional verification profiles, cross-vendor review, tripwires
 against reward hacking, immutable run manifests, and resume after a crash.
 
-**Honest outcomes:** `verified` means required profiles actually ran and passed.
-With no verification configured (git host default), a successful fleet lands
-`completed`, not a fake green. Grove host + `.grove.toml` profiles is how you
-get receipt-bound `verified` on Rust monorepos.
+**Honest outcomes:** `verified` means required profiles actually ran and passed
+against a bound candidate. With no verification configured, a successful fleet
+lands `completed`, not a fake green. On the git host, a dirty worktree never
+verifies or finishes: commit first. Grove host + `.grove.toml` is how you get
+full workspace-snapshot `verified` on Rust monorepos.
+
+**Landing:** `summoner land` merges onto a temporary integration branch, runs an
+aggregate verify (`SUMMONER_LAND_VERIFY` argv, or `cargo test` when a root
+`Cargo.toml` exists), then fast-forwards the protected branch. It refuses a
+silent no-op aggregate; set `SUMMONER_LAND_ALLOW_NO_AGGREGATE=1` only when you
+mean it.
 
 | Platform | Git host | Grove host |
 | --- | --- | --- |
-| Unix | Full independence | Full depth |
+| Unix | Independence (clean commits) | Full exact-state depth |
 | Windows | Not yet (use grove host) | Supported |
 
 ## Work orders

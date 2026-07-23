@@ -75,6 +75,8 @@ fn land(repo: &Path, cache: &Path, run_id: &str, extra: &[&str]) -> (i32, Value)
         .current_dir(repo)
         .env("XDG_CACHE_HOME", cache)
         .env("HOME", cache)
+        // Fixtures are not Cargo workspaces; opt into the documented no-gate escape.
+        .env("SUMMONER_LAND_ALLOW_NO_AGGREGATE", "1")
         .output()
         .expect("run summoner land");
     let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {

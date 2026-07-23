@@ -147,10 +147,12 @@ pub fn land(run_id: Option<String>, dry_run: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// Optional post-integration gate. `SUMMONER_LAND_VERIFY` is a shell-free argv
-/// joined by ASCII unit separator `\x1f` (program then args), or a single
-/// program name. When unset, only `cargo test --locked` runs if `Cargo.toml`
-/// exists; otherwise the gate is a no-op success.
+/// Post-integration gate before the protected target is advanced.
+///
+/// - `SUMMONER_LAND_VERIFY` — shell-free argv (space-separated, or `\x1f`-joined)
+/// - else `cargo test --locked` when a root `Cargo.toml` exists
+/// - else refuse (no silent no-op). Escape hatch for fixtures:
+///   `SUMMONER_LAND_ALLOW_NO_AGGREGATE=1`
 fn aggregate_verify(repo: &Path) -> Result<Value> {
     if let Ok(raw) = std::env::var("SUMMONER_LAND_VERIFY") {
         let argv: Vec<&str> = if raw.contains('\u{1f}') {
@@ -197,11 +199,16 @@ fn aggregate_verify(repo: &Path) -> Result<Value> {
             "passed": true,
         }));
     }
-    Ok(json!({
-        "command": [],
-        "passed": true,
-        "detail": "no SUMMONER_LAND_VERIFY and no Cargo.toml; aggregate gate skipped",
-    }))
+    if std::env::var_os("SUMMONER_LAND_ALLOW_NO_AGGREGATE").is_some() {
+        return Ok(json!({
+            "command": [],
+            "passed": true,
+            "detail": "SUMMONER_LAND_ALLOW_NO_AGGREGATE set; aggregate gate skipped",
+        }));
+    }
+    bail!(
+        "land refuses to advance the protected branch without an aggregate verify: set SUMMONER_LAND_VERIFY to an argv, add a root Cargo.toml (cargo test), or set SUMMONER_LAND_ALLOW_NO_AGGREGATE=1 for an explicit no-gate landing"
+    )
 }
 
 /// Project the report's orders into landing candidates.
