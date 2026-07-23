@@ -126,3 +126,26 @@ Global config is the base; `[profiles.<name>]` overlays it; repo
 `.summoner.toml` overrides field-by-field. Empty string clears an inherited
 value. Selection: `--profile`, then `SUMMONER_PROFILE`, then a config pin.
 Harness auto-detection only picks profiles that exist.
+
+## Notifications
+
+`[notify] command = [...]` runs when a run reaches a moment worth looking up
+from other work: the run finishes, an order lands non-green, or a review
+starts. Green orders stay silent on purpose. The command receives the event's
+JSON journal line on stdin and `SUMMONER_NOTIFY_TITLE`, `SUMMONER_NOTIFY_BODY`,
+and `SUMMONER_NOTIFY_EVENT` in the environment. One seam covers both an OS
+notifier and a webhook:
+
+```toml
+# macOS notification center
+[notify]
+command = ["sh", "-c", "osascript -e \"display notification \\\"$SUMMONER_NOTIFY_BODY\\\" with title \\\"$SUMMONER_NOTIFY_TITLE\\\"\""]
+
+# webhook: the JSON line is piped to curl
+# command = ["sh", "-c", "curl -m 5 -sX POST -H 'content-type: application/json' -d @- https://example.invalid/hook"]
+```
+
+Notifications are a side-channel over the run journal, never authoritative: a
+command that fails is ignored, and each is time-bounded so a hung one (a `curl`
+with no timeout) cannot wedge the run. Summoner waits for the final
+`run_finished` notification before exiting.

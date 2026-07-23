@@ -73,6 +73,11 @@ pub(crate) fn execute(
     std::fs::create_dir_all(&run_dir)
         .with_context(|| format!("creating run dir {}", run_dir.display()))?;
 
+    // Read the notify command from live config before the manifest binding
+    // rebuilds config without it: notifications are a personal side-channel over
+    // the journal, not a reproducible run input.
+    let notifier = crate::notify::Notifier::from_command(config.notify.command.clone());
+
     let config = crate::run_evidence::write_manifest(
         &run_dir,
         &run_id,
@@ -90,7 +95,7 @@ pub(crate) fn execute(
 
     install_interrupt_handler()?;
 
-    let events = EventSink::new(&run_dir, run_id.clone(), stream)?;
+    let events = EventSink::new(&run_dir, run_id.clone(), stream)?.with_notifier(notifier);
     let workers = config.max_parallel().min(orders.len().max(1));
     events.emit(
         "run_started",

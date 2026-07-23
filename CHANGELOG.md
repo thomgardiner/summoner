@@ -5,6 +5,15 @@
 Requires Grove 0.4.0 (task record schema 6, task-status schema 4, the `edit`
 exec capability, and pinned verification policy).
 
+### Added
+
+- `[notify] command = [...]` runs when a run finishes, an order lands non-green,
+  or a review starts, so you can leave a fleet unattended. The command gets the
+  event's JSON line on stdin and `SUMMONER_NOTIFY_TITLE`/`_BODY`/`_EVENT` in the
+  environment — one seam for an OS notifier (`osascript`, `notify-send`) or a
+  webhook (`curl` reading stdin). Best-effort and time-bounded; the run journal
+  stays authoritative.
+
 ### Changed
 
 - Pin the release-qualified compatibility contract to Grove 0.4.0. Grove 0.4.0

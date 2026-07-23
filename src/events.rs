@@ -16,12 +16,15 @@
 //! `report` carrying the ranked report. Checkpoints preserve the full gate result
 //! before cleanup; order_carried and order_finished are terminal transitions.
 
+use crate::notify::{Notifier, NotifyPlan};
 use crate::report::OrderReport;
 use anyhow::{Context, Result, anyhow, bail};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::mpsc::Sender;
+use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -30,6 +33,18 @@ pub struct EventSink {
     journal: Mutex<Journal>,
     run_id: String,
     stream_stdout: bool,
+    /// The notification side-channel, present only when a notify command is
+    /// configured. Records are handed to a single worker thread so a slow
+    /// command never serializes the fleet behind the journal lock.
+    notify: Option<NotifyChannel>,
+}
+
+/// One background worker draining notify records. Dropping the sender ends the
+/// worker's `recv` loop; [`EventSink`]'s `Drop` then joins it so the final
+/// `run_finished` notification completes before the process exits.
+struct NotifyChannel {
+    sender: Sender<(NotifyPlan, String)>,
+    worker: JoinHandle<()>,
 }
 
 struct Journal {
@@ -54,7 +69,28 @@ impl EventSink {
             }),
             run_id,
             stream_stdout,
+            notify: None,
         })
+    }
+
+    /// Attach the notify side-channel, spawning its worker thread. Off (no
+    /// thread) when `notifier` is `None`; a builder so the many test call sites
+    /// that never notify keep the simple `new` signature.
+    pub fn with_notifier(mut self, notifier: Option<Notifier>) -> Self {
+        if let Some(notifier) = notifier {
+            let (sender, receiver) = std::sync::mpsc::channel::<(NotifyPlan, String)>();
+            if let Ok(worker) = std::thread::Builder::new()
+                .name("summoner-notify".into())
+                .spawn(move || {
+                    while let Ok((plan, line)) = receiver.recv() {
+                        notifier.dispatch(&plan, &line);
+                    }
+                })
+            {
+                self.notify = Some(NotifyChannel { sender, worker });
+            }
+        }
+        self
     }
 
     /// Append one enveloped record, then mirror it to `--stream` stdout only
@@ -64,26 +100,40 @@ impl EventSink {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let mut journal = self
-            .journal
-            .lock()
-            .map_err(|_| anyhow!("run journal mutex poisoned"))?;
-        if let Some(failure) = &journal.failed {
-            bail!("run journal already failed: {failure}");
-        }
-        match journal.append(&self.run_id, event, ts, fields) {
-            Ok(text) => {
-                if self.stream_stdout {
-                    // After the flush; println! locks stdout so lines never interleave.
-                    println!("{text}");
+        // Decide notability before the journal moves `fields`; the notification
+        // then fires off the lock so a slow command never serializes the fleet.
+        let plan = self
+            .notify
+            .as_ref()
+            .and_then(|_| Notifier::plan(event, &fields));
+        let text = {
+            let mut journal = self
+                .journal
+                .lock()
+                .map_err(|_| anyhow!("run journal mutex poisoned"))?;
+            if let Some(failure) = &journal.failed {
+                bail!("run journal already failed: {failure}");
+            }
+            match journal.append(&self.run_id, event, ts, fields) {
+                Ok(text) => {
+                    if self.stream_stdout {
+                        // After the flush; println! locks stdout so lines never interleave.
+                        println!("{text}");
+                    }
+                    text
                 }
-                Ok(())
+                Err(error) => {
+                    journal.failed = Some(format!("{error:#}"));
+                    return Err(error);
+                }
             }
-            Err(error) => {
-                journal.failed = Some(format!("{error:#}"));
-                Err(error)
-            }
+        };
+        if let (Some(notify), Some(plan)) = (&self.notify, plan) {
+            // A closed channel (worker gone) is ignored: notifications are a
+            // side-channel and must never fail the run.
+            let _ = notify.sender.send((plan, text));
         }
+        Ok(())
     }
 
     /// A durable order transition with its full report-shaped evidence.
@@ -129,6 +179,18 @@ impl EventSink {
 
     pub fn streaming(&self) -> bool {
         self.stream_stdout
+    }
+}
+
+impl Drop for EventSink {
+    /// Close the notify channel and wait for its worker so the final
+    /// `run_finished` notification completes before the process exits. Each
+    /// command is time-bounded, so a hung one cannot wedge this join.
+    fn drop(&mut self) {
+        if let Some(NotifyChannel { sender, worker }) = self.notify.take() {
+            drop(sender);
+            let _ = worker.join();
+        }
     }
 }
 
@@ -206,6 +268,7 @@ mod tests {
             }),
             run_id: run_id.to_string(),
             stream_stdout: false,
+            notify: None,
         }
     }
 
@@ -228,6 +291,51 @@ mod tests {
         assert!(sink.emit("run_started", serde_json::json!({})).is_err());
         assert!(sink.failed());
         assert!(sink.check().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_notify_command_fires_for_notable_events_and_the_worker_joins_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let fired = dir.path().join("fired");
+        // Each notable event appends its title; a green order and run_started
+        // must add nothing.
+        let notifier = crate::notify::Notifier::from_command(vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "printf '%s\\n' \"$SUMMONER_NOTIFY_TITLE\" >> {}",
+                fired.display()
+            ),
+        ]);
+        let sink = EventSink::new(dir.path(), "run".into(), false)
+            .unwrap()
+            .with_notifier(notifier);
+        sink.emit("run_started", serde_json::json!({})).unwrap();
+        sink.emit("review_started", serde_json::json!({"id": "auth"}))
+            .unwrap();
+        sink.emit(
+            "order_finished",
+            serde_json::json!({"id": "ok", "outcome": "verified"}),
+        )
+        .unwrap();
+        sink.emit(
+            "order_finished",
+            serde_json::json!({"id": "bad", "outcome": "rejected"}),
+        )
+        .unwrap();
+        sink.emit(
+            "run_finished",
+            serde_json::json!({"summary": {"verified": 1}}),
+        )
+        .unwrap();
+        // Drop joins the worker, so every dispatched notification has completed.
+        drop(sink);
+        let fired = std::fs::read_to_string(&fired).unwrap();
+        assert_eq!(
+            fired,
+            "Summoner: review started\nSummoner: order rejected\nSummoner: run finished\n"
+        );
     }
 
     #[test]

@@ -50,8 +50,25 @@ pub struct Config {
     /// validation and scheduling; its digest is pinned in the run manifest and
     /// report so consumers can prove which bar gated the run.
     pub trusted_policy: Option<TrustedPolicy>,
+    /// Command run when the fleet reaches a moment worth looking up from other
+    /// work. A personal side-channel over the run journal, not part of the
+    /// reproducible run inputs, so it is read from live config and never bound
+    /// into the run manifest.
+    #[serde(default)]
+    pub notify: Notify,
     #[serde(skip)]
     pub(crate) frozen: bool,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default, deny_unknown_fields)]
+pub struct Notify {
+    /// Run per notable event (run finished, a non-green order, a review
+    /// starting): the event's JSON line arrives on stdin and
+    /// `SUMMONER_NOTIFY_TITLE`/`_BODY`/`_EVENT` in the environment. Empty
+    /// disables it. One `notify-send`/`osascript` line is an OS notification;
+    /// a `curl` reading stdin is a webhook.
+    pub command: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]

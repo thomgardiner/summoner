@@ -62,6 +62,18 @@ impl Outcome {
             Outcome::Approved => "approved",
         }
     }
+
+    /// A fully successful order: verified, and approved when a reviewer ran.
+    /// Everything else is non-green (a failure, refusal, or interruption).
+    pub fn is_green(self) -> bool {
+        matches!(self, Outcome::Verified | Outcome::Approved)
+    }
+}
+
+/// The [`Outcome::is_green`] test by its serialized `key`, for consumers that
+/// hold the journal's outcome string rather than the enum (the notifier).
+pub fn is_green_outcome(key: &str) -> bool {
+    matches!(key, "verified" | "approved")
 }
 
 #[derive(Serialize)]
@@ -118,11 +130,7 @@ impl RunReport {
     /// where a reviewer gated it); `completed` still means "review me", so it
     /// exits 1 like every other non-verified outcome.
     pub fn exit_code(&self) -> i32 {
-        if self
-            .orders
-            .iter()
-            .all(|order| matches!(order.outcome, Outcome::Verified | Outcome::Approved))
-        {
+        if self.orders.iter().all(|order| order.outcome.is_green()) {
             0
         } else {
             1

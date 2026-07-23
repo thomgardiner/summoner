@@ -11,6 +11,7 @@ mod grove;
 mod init;
 mod integration;
 mod lifecycle;
+mod notify;
 mod order;
 mod outcome;
 mod plan;
