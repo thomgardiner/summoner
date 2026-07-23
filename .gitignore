@@ -1,4 +1,6 @@
 /target
+.DS_Store
+.debug-kimi/
 
 # Public docs stay tracked (docs/reference.md). Everything else under docs/
 # is internal planning, research, or retros — never publish.
