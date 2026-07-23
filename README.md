@@ -193,6 +193,11 @@ inheritance: [docs/reference.md](docs/reference.md). Boundary: the host owns
 worktrees, claims, lanes, and receipts; Summoner owns dispatch, review, and
 reports.
 
+## Assurance
+
+Stack invariants for Grove · Summoner · Crucible: [ASSURANCE.md](ASSURANCE.md)
+(epoch 1). Features that violate an invariant are bugs, not tradeoffs.
+
 ## License
 
 MIT
