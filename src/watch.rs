@@ -68,83 +68,8 @@ pub fn render(events: &str, now: u64) -> (String, bool) {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let ts = event["ts"].as_u64().unwrap_or(0);
-        let id = event["id"].as_str().unwrap_or_default().to_string();
-        match event["event"].as_str().unwrap_or_default() {
-            "run_started" => {
-                header = format!(
-                    "run: {}  repo: {}  workers: {}",
-                    event["run_id"].as_str().unwrap_or("?"),
-                    event["repo"].as_str().unwrap_or("?"),
-                    event["workers"]
-                );
-                for carried in event["carried"].as_array().into_iter().flatten() {
-                    if let Some(id) = carried.as_str() {
-                        let row = rows.entry(id.to_string()).or_default();
-                        row.phase = "carried".into();
-                        row.started = ts;
-                        row.ended = Some(ts);
-                    }
-                }
-            }
-            "run_finished" => {
-                finished = true;
-                footer = format!(
-                    "finished in {}s  exit {}  tokens {}",
-                    event["duration_secs"], event["exit_code"], event["usage_tokens"]
-                );
-            }
-            name => {
-                let row = rows.entry(id).or_default();
-                match name {
-                    "order_started" => {
-                        row.executor = event["executor"].as_str().unwrap_or("?").into();
-                        row.phase = "starting".into();
-                        row.attempt = 1;
-                        row.started = ts;
-                    }
-                    "order_dispatched" => {
-                        row.phase = "executing".into();
-                        row.branch = event["branch"].as_str().unwrap_or_default().into();
-                    }
-                    "order_exec_done" => {
-                        row.phase = "verifying".into();
-                        row.usage = event["usage_tokens"].as_u64().or(row.usage);
-                    }
-                    "order_verify" => row.phase = "verified".into(),
-                    "review_started" => {
-                        row.phase =
-                            format!("review ({})", event["reviewer"].as_str().unwrap_or("?"));
-                    }
-                    "order_review" => {
-                        row.phase =
-                            format!("reviewed: {}", event["verdict"].as_str().unwrap_or("?"));
-                    }
-                    "order_revised" => {
-                        row.attempt = event["attempt"].as_u64().unwrap_or(row.attempt + 1);
-                        row.phase =
-                            format!("revising ({})", event["reason"].as_str().unwrap_or("retry"));
-                    }
-                    "order_finished" => {
-                        row.phase = event["outcome"].as_str().unwrap_or("?").into();
-                        row.ended = Some(ts);
-                        row.usage = event["usage_tokens"].as_u64().or(row.usage);
-                        row.attempt = event["attempts"].as_u64().unwrap_or(row.attempt.max(1));
-                        row.detail = event["detail"].as_str().unwrap_or_default().into();
-                        // The attach handles: the branch holds the work, the
-                        // session id resumes the executor's context.
-                        if row.detail.is_empty()
-                            && let Some(session) = event["session_id"].as_str()
-                        {
-                            row.detail = format!("session {session}");
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        apply_event(&event, &mut rows, &mut header, &mut footer, &mut finished);
     }
-    // A stray empty-id row from unknown events must not render.
     rows.remove("");
 
     let mut out = format!("{header}\n\n");
@@ -178,6 +103,86 @@ pub fn render(events: &str, now: u64) -> (String, bool) {
     }
     out.push_str(&format!("\n{footer}\n"));
     (out, finished)
+}
+
+fn apply_event(
+    event: &serde_json::Value,
+    rows: &mut BTreeMap<String, OrderRow>,
+    header: &mut String,
+    footer: &mut String,
+    finished: &mut bool,
+) {
+    let ts = event["ts"].as_u64().unwrap_or(0);
+    let id = event["id"].as_str().unwrap_or_default().to_string();
+    match event["event"].as_str().unwrap_or_default() {
+        "run_started" => {
+            *header = format!(
+                "run: {}  repo: {}  workers: {}",
+                event["run_id"].as_str().unwrap_or("?"),
+                event["repo"].as_str().unwrap_or("?"),
+                event["workers"]
+            );
+            for carried in event["carried"].as_array().into_iter().flatten() {
+                if let Some(id) = carried.as_str() {
+                    let row = rows.entry(id.to_string()).or_default();
+                    row.phase = "carried".into();
+                    row.started = ts;
+                    row.ended = Some(ts);
+                }
+            }
+        }
+        "run_finished" => {
+            *finished = true;
+            *footer = format!(
+                "finished in {}s  exit {}  tokens {}",
+                event["duration_secs"], event["exit_code"], event["usage_tokens"]
+            );
+        }
+        name => {
+            let row = rows.entry(id).or_default();
+            match name {
+                "order_started" => {
+                    row.executor = event["executor"].as_str().unwrap_or("?").into();
+                    row.phase = "starting".into();
+                    row.attempt = 1;
+                    row.started = ts;
+                }
+                "order_dispatched" => {
+                    row.phase = "executing".into();
+                    row.branch = event["branch"].as_str().unwrap_or_default().into();
+                }
+                "order_exec_done" => {
+                    row.phase = "verifying".into();
+                    row.usage = event["usage_tokens"].as_u64().or(row.usage);
+                }
+                "order_verify" => row.phase = "verified".into(),
+                "review_started" => {
+                    row.phase = format!("review ({})", event["reviewer"].as_str().unwrap_or("?"));
+                }
+                "order_review" => {
+                    row.phase = format!("reviewed: {}", event["verdict"].as_str().unwrap_or("?"));
+                }
+                "order_revised" => {
+                    row.attempt = event["attempt"].as_u64().unwrap_or(row.attempt + 1);
+                    row.phase =
+                        format!("revising ({})", event["reason"].as_str().unwrap_or("retry"));
+                }
+                "order_finished" => {
+                    row.phase = event["outcome"].as_str().unwrap_or("?").into();
+                    row.ended = Some(ts);
+                    row.usage = event["usage_tokens"].as_u64().or(row.usage);
+                    row.attempt = event["attempts"].as_u64().unwrap_or(row.attempt.max(1));
+                    row.detail = event["detail"].as_str().unwrap_or_default().into();
+                    if row.detail.is_empty()
+                        && let Some(session) = event["session_id"].as_str()
+                    {
+                        row.detail = format!("session {session}");
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 fn truncate(text: &str, max: usize) -> String {

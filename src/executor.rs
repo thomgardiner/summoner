@@ -199,56 +199,65 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
         ExecutionPlan::HostWrapped {
             argv,
             backup_grace_secs,
-        } => {
-            let mut command = Command::new(&argv[0]);
-            command
-                .args(&argv[1..])
-                .current_dir(req.worktree)
-                .stdout(Stdio::from(stdout))
-                .stderr(Stdio::from(stderr));
-            command.stdin(match req.backend.routing() {
-                PromptRouting::Stdin => Stdio::piped(),
-                _ => Stdio::null(),
+        } => run_host_wrapped(req, &argv, backup_grace_secs, &prompt, stdout, stderr),
+    }
+}
+
+fn run_host_wrapped(
+    req: &ExecRequest,
+    argv: &[String],
+    backup_grace_secs: u64,
+    prompt: &str,
+    stdout: File,
+    stderr: File,
+) -> Result<ExecOutcome> {
+    let mut command = Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .current_dir(req.worktree)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    command.stdin(match req.backend.routing() {
+        PromptRouting::Stdin => Stdio::piped(),
+        _ => Stdio::null(),
+    });
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("spawning {}", argv[0]))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let prompt = prompt.to_string();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(prompt.as_bytes());
+        });
+    }
+    let backup_deadline = Instant::now()
+        + Duration::from_secs(
+            req.timeout_secs
+                .saturating_add(backup_grace_secs)
+                .min(31_536_000),
+        );
+    let mut terminated = false;
+    loop {
+        if let Some(status) = child.try_wait().context("waiting for host-wrapped exec")? {
+            return Ok(ExecOutcome {
+                exit: status.code(),
+                backup_killed: false,
             });
-            let mut child = command
-                .spawn()
-                .with_context(|| format!("spawning {}", argv[0]))?;
-            if let Some(mut stdin) = child.stdin.take() {
-                std::thread::spawn(move || {
-                    let _ = stdin.write_all(prompt.as_bytes());
-                });
-            }
-            let backup_deadline = Instant::now()
-                + Duration::from_secs(
-                    req.timeout_secs
-                        .saturating_add(backup_grace_secs)
-                        .min(31_536_000),
-                );
-            let mut terminated = false;
-            let outcome = loop {
-                if let Some(status) = child.try_wait().context("waiting for host-wrapped exec")? {
-                    break ExecOutcome {
-                        exit: status.code(),
-                        backup_killed: false,
-                    };
-                }
-                if req.shutdown.load(Ordering::SeqCst) && !terminated {
-                    terminate_supervisor(&child);
-                    terminated = true;
-                }
-                if Instant::now() >= backup_deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = req.host.kill_supervised(req.task_id, req.worktree);
-                    break ExecOutcome {
-                        exit: None,
-                        backup_killed: true,
-                    };
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            };
-            Ok(outcome)
         }
+        if req.shutdown.load(Ordering::SeqCst) && !terminated {
+            terminate_supervisor(&child);
+            terminated = true;
+        }
+        if Instant::now() >= backup_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = req.host.kill_supervised(req.task_id, req.worktree);
+            return Ok(ExecOutcome {
+                exit: None,
+                backup_killed: true,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
