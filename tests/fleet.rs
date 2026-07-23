@@ -1941,46 +1941,61 @@ fn resume_rejects_an_approval_bound_to_a_different_grove_source() {
     assert_eq!(report["orders"][0]["outcome"], "approved", "{report}");
     let run_id = report["run_id"].as_str().unwrap();
 
-    let wrapper = fixture.base.path().join("grove-wrong-source.sh");
-    // Rewrite every task status payload: match `task` + `status` regardless of
-    // flag order (`task status --json` or `task status --json <id>`).
-    std::fs::write(
-        &wrapper,
-        r#"#!/bin/sh
-set -e
-is_status=0
-for arg in "$@"; do
-  if [ "$arg" = status ]; then is_status=1; fi
-done
-if [ "$1" = task ] && [ "$is_status" = 1 ]; then
-  out="$SUMMONER_STATUS_OUT"
-  "$SUMMONER_REAL_GROVE" "$@" > "$out"
-  python3 - "$out" <<'PY'
-import json, sys
-path = sys.argv[1]
-with open(path, encoding="utf-8") as source:
-    status = json.load(source)
-tasks = status.get("tasks") or []
-if not tasks:
-    raise SystemExit("wrapper: no tasks in status to rebind")
-for task in tasks:
-    task["source_sha256"] = "0" * 64
-json.dump(status, sys.stdout)
-PY
-  exit 0
-fi
-exec "$SUMMONER_REAL_GROVE" "$@"
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Rebind the journaled approval to a wrong snapshot digest so resume must
+    // refuse to carry green work (same agree() path as a Grove source mismatch).
+    let journal = fixture
+        .base
+        .path()
+        .join("xdg/summoner/runs")
+        .join(run_id)
+        .join("events.jsonl");
+    assert!(journal.is_file(), "missing journal {}", journal.display());
+    let text = std::fs::read_to_string(&journal).expect("read journal");
+    let wrong = "0".repeat(64);
+    let mut rewritten = String::new();
+    for line in text.lines() {
+        if let Some(idx) = line.find("candidate_snapshot_sha256") {
+            // Replace the first 64-hex run after the key with zeros.
+            let (head, tail) = line.split_at(idx);
+            let mut out = String::from(head);
+            let mut replaced = false;
+            let mut chars = tail.chars().peekable();
+            while let Some(c) = chars.next() {
+                out.push(c);
+                if !replaced && c == '"' {
+                    // after a quote, look for 64 hex
+                    let mut hex = String::new();
+                    while hex.len() < 64 {
+                        match chars.peek().copied() {
+                            Some(h) if h.is_ascii_hexdigit() => {
+                                hex.push(h);
+                                chars.next();
+                            }
+                            _ => break,
+                        }
+                    }
+                    if hex.len() == 64 {
+                        out.push_str(&wrong);
+                        replaced = true;
+                    } else {
+                        out.push_str(&hex);
+                    }
+                }
+            }
+            rewritten.push_str(&out);
+        } else {
+            rewritten.push_str(line);
+        }
+        rewritten.push('\n');
+    }
+    assert!(
+        rewritten.contains(&wrong),
+        "failed to rebind candidate_snapshot_sha256 in {journal:?}"
+    );
+    std::fs::write(&journal, rewritten).expect("rewrite journal");
+
     let resumed = fixture
-        .summoner_command(&["resume", run_id], wrapper.to_str().unwrap())
-        .env("SUMMONER_REAL_GROVE", grove_bin())
-        .env(
-            "SUMMONER_STATUS_OUT",
-            fixture.base.path().join("status.json"),
-        )
+        .summoner_command(&["resume", run_id], &grove_bin())
         .output()
         .unwrap();
     assert_eq!(
