@@ -94,12 +94,18 @@ pub struct TrustedPolicy {
     pub require_reviewer: bool,
     /// The reviewer's configured name must differ from the executor's. This
     /// compares names, nothing deeper: two aliases invoking the same binary
-    /// and model satisfy it. Independence beyond the name needs provenance-
-    /// or model-level identity, which backends do not yet declare.
+    /// and model satisfy it when identity is unset.
     pub distinct_reviewer_name: bool,
+    /// Require executor and reviewer to declare different `identity` strings
+    /// (provider/model provenance label). Both must set identity; equal values
+    /// refuse. Closes the two-aliases-same-model hole.
+    pub distinct_reviewer_identity: bool,
     /// Orders must select their verify_profile from this list (one-of
     /// allowlist). It does not make every listed profile run.
     pub allowed_profiles: Vec<String>,
+    /// Profiles that must run for every order under this policy (in addition to
+    /// the order's own verify_profile). Empty means no mandatory multi-profile.
+    pub required_profiles: Vec<String>,
     /// Closed set of executor names orders may use; empty allows any configured.
     pub allowed_executors: Vec<String>,
     /// Closed set of reviewer names; empty allows any configured.
@@ -140,7 +146,7 @@ impl TrustedPolicy {
         use sha2::{Digest, Sha256};
         use std::fmt::Write;
         let mut hash = Sha256::new();
-        hash.update(b"summoner.trusted-policy.v2\0");
+        hash.update(b"summoner.trusted-policy.v3\0");
         hash.update(serde_json::to_vec(self).expect("policy serializes"));
         let mut hex = String::with_capacity(64);
         for byte in hash.finalize() {
@@ -189,6 +195,11 @@ pub struct ExecutorBackend {
     pub session_marker: Option<String>,
     #[serde(default)]
     pub resume_argv: Vec<String>,
+    /// Operator-declared provider/model identity (e.g. `openai:gpt-5`,
+    /// `anthropic:opus`). Used by `distinct_reviewer_identity` so two config
+    /// aliases of the same model cannot satisfy independence.
+    #[serde(default)]
+    pub identity: Option<String>,
     /// Immutable launch bindings populated from a run manifest. Config files
     /// cannot set these fields.
     #[serde(skip)]

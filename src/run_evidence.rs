@@ -242,6 +242,7 @@ mod tests {
                 usage_marker: None,
                 session_marker: None,
                 resume_argv: vec![],
+                identity: None,
                 provenance: None,
                 resume_provenance: None,
             },

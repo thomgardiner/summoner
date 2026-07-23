@@ -337,18 +337,6 @@ fn policy_problems(
     if policy.require_reviewer && reviewer.is_none() {
         problems.push("trusted policy requires an independent reviewer".to_string());
     }
-    if policy.require_reviewer {
-        // Held review needs an immutable capsule host; do not schedule review
-        // against a host that cannot isolate the candidate.
-        if let Some(host) = config.host.as_ref().and_then(|h| h.kind.as_deref())
-            && host.eq_ignore_ascii_case("git")
-        {
-            problems.push(
-                "trusted policy requires a reviewer but host kind \"git\" lacks immutable inspection and finish CAS; set [host] kind = \"grove\" or drop require_reviewer"
-                    .into(),
-            );
-        }
-    }
     if let Some(required) = policy.required_host.as_deref()
         && let Some(configured) = config.host.as_ref().and_then(|h| h.kind.as_deref())
         && !configured.eq_ignore_ascii_case(required)
@@ -362,6 +350,26 @@ fn policy_problems(
             problems.push(format!(
                 "trusted policy requires a reviewer distinct from executor {executor:?}"
             ));
+        }
+        if policy.distinct_reviewer_identity {
+            let e_id = config
+                .executors
+                .get(&executor)
+                .and_then(|b| b.identity.as_deref());
+            let r_id = config
+                .executors
+                .get(reviewer)
+                .and_then(|b| b.identity.as_deref());
+            match (e_id, r_id) {
+                (Some(e), Some(r)) if e == r => problems.push(format!(
+                    "trusted policy requires distinct reviewer identity; executor and reviewer both declare {e:?}"
+                )),
+                (None, _) | (_, None) => problems.push(
+                    "trusted policy requires distinct_reviewer_identity; set identity on both executor and reviewer backends"
+                        .into(),
+                ),
+                _ => {}
+            }
         }
         if !policy.allowed_reviewers.is_empty()
             && !policy.allowed_reviewers.iter().any(|name| name == reviewer)
@@ -398,6 +406,23 @@ fn policy_problems(
                 policy.allowed_profiles.join(", "),
                 profile.as_deref().unwrap_or("none")
             ));
+        }
+    }
+    if !policy.required_profiles.is_empty() {
+        let known = config
+            .verification
+            .as_ref()
+            .map(|v| v.profiles.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        // Grove host profiles live in .grove.toml; when no local verification
+        // table exists we still require the names to be declared so the policy
+        // is not a silent no-op.
+        for profile in &policy.required_profiles {
+            if !known.is_empty() && !known.iter().any(|p| p == profile) {
+                problems.push(format!(
+                    "trusted policy requires profile {profile:?} but it is not defined in [verification]"
+                ));
+            }
         }
     }
     problems
@@ -603,6 +628,7 @@ mod tests {
                     usage_marker: None,
                     session_marker: None,
                     resume_argv: Vec::new(),
+                    identity: None,
                     provenance: None,
                     resume_provenance: None,
                 },
@@ -1046,7 +1072,9 @@ acceptance = ["tests pass"]
         config.trusted_policy = Some(crate::config::TrustedPolicy {
             require_reviewer: true,
             distinct_reviewer_name: true,
+            distinct_reviewer_identity: false,
             allowed_profiles: vec!["full".into()],
+            required_profiles: Vec::new(),
             allowed_executors: vec!["fake".into()],
             allowed_reviewers: vec!["judge".into()],
             protected_paths: Vec::new(),
@@ -1086,26 +1114,30 @@ acceptance = ["tests pass"]
             "{text}"
         );
 
-        // Held review is refused on the git host even when a reviewer is named.
-        config.host = Some(crate::config::HostSettings {
-            kind: Some("git".into()),
-            bin: None,
-            worktree_root: None,
-        });
-        let reviewed = write_order(
+        // Distinct identity refuses two backends that claim the same model.
+        config.executors.get_mut("fake").unwrap().identity = Some("vendor:model-a".into());
+        config.executors.get_mut("judge").unwrap().identity = Some("vendor:model-a".into());
+        config
+            .trusted_policy
+            .as_mut()
+            .unwrap()
+            .distinct_reviewer_identity = true;
+        let same_id = write_order(
             dir.path(),
-            "reviewed-git.toml",
-            "id = \"rg\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\n\
+            "same-id.toml",
+            "id = \"sid\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\n\
              executor = \"fake\"\nreviewer = \"judge\"\nverify_profile = \"full\"\n",
         );
-        let text = validate(&load(&[reviewed]).unwrap(), &config).join("\n");
-        assert!(
-            text.contains("lacks immutable inspection") || text.contains("kind = \"grove\""),
-            "{text}"
-        );
+        let text = validate(&load(&[same_id]).unwrap(), &config).join("\n");
+        assert!(text.contains("distinct reviewer identity"), "{text}");
+        config.executors.get_mut("judge").unwrap().identity = Some("vendor:model-b".into());
+        config
+            .trusted_policy
+            .as_mut()
+            .unwrap()
+            .distinct_reviewer_identity = false;
 
-        // A compliant order validates clean under the same policy without a git host pin.
-        config.host = None;
+        // A compliant order validates clean under the same policy.
         let good = write_order(
             dir.path(),
             "good.toml",

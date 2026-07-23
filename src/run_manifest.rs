@@ -355,6 +355,7 @@ impl From<&Backend> for ExecutorBackend {
             usage_marker: backend.usage_marker.clone(),
             session_marker: backend.session_marker.clone(),
             resume_argv: backend.resume_argv.clone(),
+            identity: None,
             provenance: Some(backend.provenance.clone()),
             resume_provenance: backend.resume_provenance.clone(),
         }
@@ -376,6 +377,7 @@ mod tests {
             usage_marker: None,
             session_marker: None,
             resume_argv: vec![executable.display().to_string(), "resume".into()],
+            identity: None,
             provenance: None,
             resume_provenance: None,
         };

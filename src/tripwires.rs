@@ -102,7 +102,7 @@ pub fn analyze_with(
     let mut flags = Vec::new();
 
     for (status, path) in changed {
-        if PROTECTED.contains(&path.as_str())
+        if PROTECTED.iter().any(|entry| protects(entry, path))
             || extra_protected.iter().any(|entry| protects(entry, path))
         {
             protected.insert(path.clone());

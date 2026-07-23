@@ -3,7 +3,7 @@
 All notable changes to Summoner are documented here. Summoner follows semantic
 versioning.
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-07-23
 
 Requires Grove 0.4.0 (task record schema 6, task-status schema 4, the `edit`
 exec capability, and pinned verification policy).
@@ -14,12 +14,17 @@ exec capability, and pinned verification policy).
   (`scope_includes_committed_delta`, `verification_bound_to_source`,
   `immutable_inspection_snapshot`, `review_process_isolated`,
   `finish_source_compare_and_swap`). Trusted policy can pin `required_host`
-  and `required_capabilities`; held review is refused on hosts that cannot
-  isolate a candidate (the git host is not equivalent to Grove).
+  and `required_capabilities`; held review requires a host that can isolate
+  the candidate (git host now uses a detached private worktree capsule).
 - Git host records `start_commit` at task begin, scopes against committed
   deltas since begin (not only dirty tree), binds verification to HEAD, and
-  enforces finish-time source compare-and-swap. Inspection metadata is honest
-  (real log digests, source_unchanged) so integrity fails closed on mutation.
+  enforces finish-time source compare-and-swap. Review runs in a detached
+  worktree so the reviewer cannot mutate the live executor tree.
+- Executor `identity` (provider/model label) and trusted policy
+  `distinct_reviewer_identity` so two aliases of the same model cannot
+  satisfy independence.
+- Trusted policy `required_profiles`: every listed profile runs for each order
+  (mandatory multi-profile), in addition to the one-of `allowed_profiles`.
 - `summoner land` merges candidates onto a temporary integration branch, runs
   an optional aggregate verify (`SUMMONER_LAND_VERIFY` or `cargo test` when a
   Cargo.toml exists), and only then fast-forwards the protected target. Partial

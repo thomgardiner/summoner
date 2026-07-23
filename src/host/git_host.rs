@@ -98,12 +98,12 @@ impl Host for GitHost {
             receipt_finish: true,
             cargo_topology: false,
             cow_lanes: false,
-            // Live-worktree review is not a private capsule; held review is gated.
-            inspection_capsule: false,
+            // Detached private worktree at the candidate commit for review.
+            inspection_capsule: true,
             scope_includes_committed_delta: true,
             verification_bound_to_source: true,
-            immutable_inspection_snapshot: false,
-            review_process_isolated: false,
+            immutable_inspection_snapshot: true,
+            review_process_isolated: true,
             finish_source_compare_and_swap: true,
             protected_paths: protected,
         }
@@ -508,16 +508,45 @@ impl Host for GitHost {
         task_id: &str,
         _lease_secs: u64,
     ) -> Result<InspectionAcquire> {
-        // Weak capsule: review still runs in the live worktree (not isolated).
-        // Metadata is honest so the integrity gate can fail closed on mutation.
-        let head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
+        // Private capsule: detached worktree pinned at the candidate commit so
+        // the reviewer cannot mutate the live executor worktree or amend HEAD.
+        let head = git_out(worktree, &["rev-parse", "HEAD"]).context("capsule head")?;
         let source_sha256 = sha256_hex(head.as_bytes());
         let capsule_id = format!("git-capsule-{task_id}");
+        let capsule_path = self.state_root.join("capsules").join(&capsule_id);
+        if capsule_path.exists() {
+            let _ = Command::new("git")
+                .args([
+                    "worktree",
+                    "remove",
+                    "--force",
+                    &capsule_path.to_string_lossy(),
+                ])
+                .current_dir(worktree)
+                .status();
+            let _ = std::fs::remove_dir_all(&capsule_path);
+        }
+        std::fs::create_dir_all(capsule_path.parent().unwrap())?;
+        let st = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--detach",
+                &capsule_path.to_string_lossy(),
+                &head,
+            ])
+            .current_dir(worktree)
+            .status()
+            .context("creating private review worktree")?;
+        if !st.success() {
+            bail!("git worktree add --detach failed for inspection capsule {capsule_id}");
+        }
         let meta = serde_json::json!({
             "task_id": task_id,
             "source_sha256": source_sha256,
             "head": head,
-            "worktree": worktree,
+            "live_worktree": worktree,
+            "capsule_path": capsule_path,
         });
         std::fs::write(
             self.state_root.join(format!("{capsule_id}.json")),
@@ -526,7 +555,7 @@ impl Host for GitHost {
         Ok(InspectionAcquire {
             schema_version: 1,
             capsule_id,
-            path: worktree.to_path_buf(),
+            path: capsule_path,
             task_id: task_id.into(),
             source_sha256,
         })
@@ -547,6 +576,14 @@ impl Host for GitHost {
         )?;
         let task_id = meta["task_id"].as_str().unwrap_or("").to_string();
         let bound = meta["source_sha256"].as_str().unwrap_or("").to_string();
+        let bound_head = meta["head"].as_str().unwrap_or("").to_string();
+        let capsule_path = PathBuf::from(meta["capsule_path"].as_str().unwrap_or(""));
+        if !capsule_path.is_dir() {
+            bail!(
+                "inspection capsule path missing: {}",
+                capsule_path.display()
+            );
+        }
         let stdout_path = self.state_root.join(format!("{capsule_id}-stdout.log"));
         let stderr_path = self.state_root.join(format!("{capsule_id}-stderr.log"));
         let stdout = std::fs::File::create(&stdout_path)?;
@@ -554,22 +591,27 @@ impl Host for GitHost {
         let shutdown = AtomicBool::new(false);
         let outcome = supervise::run(
             argv,
-            worktree,
+            &capsule_path,
             timeout_secs,
             None,
             std::process::Stdio::from(stdout),
             std::process::Stdio::from(stderr),
             &shutdown,
         )?;
-        let head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
-        let source_sha256 = sha256_hex(head.as_bytes());
-        let source_unchanged = source_sha256 == bound;
-        let tree_clean = git_out(worktree, &["status", "--porcelain"])
+        let capsule_head = git_out(&capsule_path, &["rev-parse", "HEAD"]).unwrap_or_default();
+        let live_head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
+        let source_sha256 = sha256_hex(live_head.as_bytes());
+        // Candidate on the live worktree must still be the bound commit; capsule
+        // must still be at that commit and clean (reviewer isolation).
+        let source_unchanged = source_sha256 == bound && live_head == bound_head;
+        let capsule_unchanged = capsule_head == bound_head && capsule_path.is_dir();
+        let tree_clean = git_out(&capsule_path, &["status", "--porcelain"])
             .map(|s| s.trim().is_empty())
             .unwrap_or(false);
         let stdout_bytes = std::fs::read(&stdout_path).unwrap_or_default();
         let stderr_bytes = std::fs::read(&stderr_path).unwrap_or_default();
-        let authorized = outcome.exit == Some(0) && tree_clean && source_unchanged;
+        let authorized =
+            outcome.exit == Some(0) && tree_clean && source_unchanged && capsule_unchanged;
         Ok(InspectionExec {
             schema_version: 1,
             capsule_id: capsule_id.into(),
@@ -578,10 +620,11 @@ impl Host for GitHost {
             timed_out: outcome.backup_killed,
             tree_clean,
             source_unchanged,
-            // Live worktree is the capsule; "unchanged" means path still exists.
-            capsule_unchanged: worktree.is_dir(),
+            capsule_unchanged,
             authorized,
-            source_sha256,
+            // Review binding is the live candidate digest, not the capsule's
+            // detached HEAD string after a reviewer amends (which would diverge).
+            source_sha256: bound,
             stdout: InspectionLog {
                 path: stdout_path,
                 sha256: sha256_hex(&stdout_bytes),
@@ -595,8 +638,26 @@ impl Host for GitHost {
         })
     }
 
-    fn inspection_release(&self, _worktree: &Path, capsule_id: &str) -> Result<()> {
-        let _ = std::fs::remove_file(self.state_root.join(format!("{capsule_id}.json")));
+    fn inspection_release(&self, worktree: &Path, capsule_id: &str) -> Result<()> {
+        let meta_path = self.state_root.join(format!("{capsule_id}.json"));
+        if let Ok(bytes) = std::fs::read(&meta_path)
+            && let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        {
+            let capsule_path = PathBuf::from(meta["capsule_path"].as_str().unwrap_or(""));
+            if !capsule_path.as_os_str().is_empty() {
+                let _ = Command::new("git")
+                    .args([
+                        "worktree",
+                        "remove",
+                        "--force",
+                        &capsule_path.to_string_lossy(),
+                    ])
+                    .current_dir(worktree)
+                    .status();
+                let _ = std::fs::remove_dir_all(&capsule_path);
+            }
+        }
+        let _ = std::fs::remove_file(meta_path);
         let _ = std::fs::remove_file(self.state_root.join(format!("{capsule_id}-stdout.log")));
         let _ = std::fs::remove_file(self.state_root.join(format!("{capsule_id}-stderr.log")));
         Ok(())

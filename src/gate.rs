@@ -31,11 +31,22 @@ pub(crate) fn profile_verify(
         report.detail = Some("interrupted before verification".into());
         return Ok(false);
     }
+    let mut profiles = Vec::new();
     if let Some(profile) = order
         .verify_profile
         .clone()
         .or_else(|| ctx.config.default_verify_profile.clone())
     {
+        profiles.push(profile);
+    }
+    if let Some(policy) = ctx.config.trusted_policy.as_ref() {
+        for profile in &policy.required_profiles {
+            if !profiles.iter().any(|p| p == profile) {
+                profiles.push(profile.clone());
+            }
+        }
+    }
+    for profile in profiles {
         let summary = grove_verify(ctx, worktree, &profile, task_id)?;
         let passed = summary.passed;
         ctx.events.emit(

@@ -9,6 +9,7 @@ fn backend(argv: &[&str]) -> ExecutorBackend {
         usage_marker: None,
         session_marker: None,
         resume_argv: Vec::new(),
+        identity: None,
         provenance: None,
         resume_provenance: None,
     }

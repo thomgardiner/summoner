@@ -38,6 +38,9 @@ jobs:
           cargo nextest run --locked --no-tests fail --bins
           --test setup_onboard --test setup_doctor --test setup_gates
           --test init_atomic
+          --test anti_reward_stack --test fault_injection
+          --test anti_reward_scope --test anti_reward_verify
+          --test host_git --test land
 
   fleet:
     runs-on: ${{ matrix.os }}
