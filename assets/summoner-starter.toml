@@ -22,7 +22,22 @@
 #                                 # failure evidence up to N extra attempts
 # run_token_budget       = 500000 # run-wide token breaker: once scraped usage
 #                                 # crosses it, remaining orders are skipped
-# grove_bin              = "grove"
+#
+# Isolation host (plugin). Default resolution when unset:
+#   explicit [host] kind → legacy grove_bin → .grove.toml + grove on PATH → git
+# [host]
+# kind = "git"          # independence: git worktrees + local claims (Unix)
+# # kind = "grove"      # Rust depth: CoW lanes, governor, receipt finish
+# # bin  = "grove"
+# # worktree_root = "/fast/worktrees"
+#
+# Git-host verification (ignored by grove host; grove uses .grove.toml):
+# [verification]
+# required = ["fast"]
+# [verification.profiles.fast]
+# commands = [{ argv = ["true"], allow_zero_tests = true }]
+#
+# grove_bin              = "grove"   # legacy; prefer [host] kind = "grove"
 
 # ------------------------------------------------------------------------
 # Executor template. An executor is an argv template for any agent CLI:
@@ -33,7 +48,7 @@
 #                             #   "arg"   -> substituted into {prompt}
 #                             #   "stdin" -> piped in, then closed
 #                             #   "file"  -> written to the run dir, path in {prompt_file}
-# timeout_secs = 900          # per-order deadline, enforced by grove
+# timeout_secs = 900          # per-order deadline (host-enforced)
 # env_required = ["MY_KEY"]   # preflight fails fast if these are unset
 # usage_marker = "tokens used" # optional: first number after this marker's
 #                             # last occurrence is recorded as token usage
@@ -46,7 +61,7 @@
 # Placeholders, substituted per argv element ({prompt} always last):
 #   {prompt}         the composed worker charter + work order
 #   {prompt_file}    path to the same, written to the run directory
-#   {worktree}       absolute path of the order's grove worktree
+#   {worktree}       absolute path of the order's isolated worktree
 #   {git_common_dir} the repository's shared .git dir; a sandboxed executor
 #                    needs it writable to commit from a linked worktree
 #   {order_file}     absolute path of the run-owned order snapshot on replay

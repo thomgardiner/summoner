@@ -1,0 +1,6 @@
+{
+  "cmd": "cargo test -q --bins",
+  "runs": 2,
+  "failPattern": "(?:FAILED|failures:|error\\[E)",
+  "memoryMb": 4096
+}

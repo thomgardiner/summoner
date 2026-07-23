@@ -16,7 +16,7 @@ mod compat;
 #[path = "grove_inspection.rs"]
 mod inspection;
 pub use compat::Capabilities;
-pub use inspection::InspectionExec;
+pub use inspection::{InspectionAcquire, InspectionExec, InspectionLog};
 
 pub struct GroveCli {
     bin: String,
@@ -40,7 +40,7 @@ pub struct TaskInfo {
     pub id: String,
 }
 
-#[derive(Deserialize, serde::Serialize, Default, Clone)]
+#[derive(Debug, Deserialize, serde::Serialize, Default, Clone)]
 #[serde(default)]
 pub struct TaskVerification {
     pub required: Vec<String>,

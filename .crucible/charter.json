@@ -1,0 +1,42 @@
+{
+  "gates": [
+    {
+      "blockingCondition": "always",
+      "checker": "checks/check-unit.sh",
+      "id": "unit",
+      "oracleSha256": "33b5ac9960f6046101f171dfd6e186c57492c46177f6635c2a8d52a0438d14cd",
+      "rule": "Unit tests and host-independence integration (host_git) stay green",
+      "tier": "T1"
+    },
+    {
+      "blockingCondition": "always",
+      "checker": "checks/check-host-honesty.sh",
+      "id": "host-honesty",
+      "oracleSha256": "d0173b36c5d06c9e61526859fdc08e0862b6125c3e94a4bf113f07a200cc83bf",
+      "rule": "Git host sets verified only when required profiles exist; missing profile fails closed; gate maps verification.verified to Outcome",
+      "tier": "T1"
+    },
+    {
+      "blockingCondition": "always",
+      "checker": "checks/check-tripwires.sh",
+      "id": "tripwires",
+      "oracleSha256": "d6f69d4097f1881271c86316fba0ee703fbcfce0cf9d32bd67860099705bb7c2",
+      "rule": "Anti-reward tripwire inventory and anti_reward cheat-order tests remain present",
+      "tier": "T1"
+    },
+    {
+      "blockingCondition": "always",
+      "checker": "checks/check-test-smells.sh",
+      "id": "test-smells",
+      "oracleSha256": "ffd3265f281e4bf4e05ed57b9e6e7648ffda3442c50e6e28a477bfa1b25a9433",
+      "rule": "Host/gate/tripwire tests must not contain test-gaming smells",
+      "tier": "T1"
+    },
+    {
+      "id": "full-suite-in-ci",
+      "reason": "Local pre-push runs the four T1 checkers via scripts/verify.sh; full cargo test is the CI floor and flake arm",
+      "rule": "Full cargo test (unit + integration) on every CI push",
+      "tier": "T3"
+    }
+  ]
+}

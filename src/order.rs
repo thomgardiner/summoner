@@ -170,6 +170,19 @@ fn parse(path: &Path) -> Result<Order> {
     Ok(order)
 }
 
+/// Only when the operator *opts in* to the git host. Auto-resolved git
+/// (no grove present) still gets the check; explicit grove does not.
+fn git_host_active(config: &Config) -> bool {
+    if let Some(host) = &config.host
+        && let Some(kind) = host.kind.as_deref()
+    {
+        return kind.eq_ignore_ascii_case("git");
+    }
+    // No explicit host: use resolver (git when no grove / no .grove.toml).
+    let repo = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    crate::host::resolve(config, &repo).kind == "git"
+}
+
 /// Every problem in the batch, not just the first, so the orchestrator fixes
 /// its order files in one pass instead of replaying the run per error.
 pub fn validate(orders: &[Order], config: &Config) -> Vec<String> {
@@ -203,6 +216,17 @@ pub fn validate(orders: &[Order], config: &Config) -> Vec<String> {
             problems.push(format!(
                 "{at}: scope must be a non-empty list of non-empty entries"
             ));
+        }
+        // crate: claims need Cargo topology (grove host). On a resolved git
+        // host they are opaque and unsafe to treat as path claims.
+        if git_host_active(config) {
+            for entry in &order.scope {
+                if entry.starts_with("crate:") {
+                    problems.push(format!(
+                        "{at}: scope entry {entry:?} uses crate: which requires the grove host; set [host] kind = \"grove\" or use filesystem paths"
+                    ));
+                }
+            }
         }
         if let Some(timeout) = order.timeout_secs
             && !(1..=604_800).contains(&timeout)

@@ -8,6 +8,7 @@ mod events;
 mod executor;
 mod gate;
 mod grove;
+mod host;
 mod init;
 mod integration;
 mod land;
@@ -30,6 +31,8 @@ mod run_manifest;
 mod run_prepare;
 mod run_resume;
 mod scorecard;
+mod setup;
+mod skills;
 mod tripwires;
 mod watch;
 
@@ -39,7 +42,15 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "summoner", version)]
+#[command(
+    name = "summoner",
+    version,
+    about = "Host-pluggable fleet runner for coding-agent CLIs (git host by default; Grove optional).",
+    after_help = "First run:  summoner setup --preset codex\n\
+                  Project:    summoner setup --repo && summoner init --example\n\
+                  Invoke:     Claude /summoner · Codex skill · shell: summoner plan|run\n\
+                  Hosts:      [host] kind = \"git\" | \"grove\"  (independence vs Rust depth)"
+)]
 struct Cli {
     /// Orchestrator profile from `[profiles.<name>]` in the config.
     #[arg(long, global = true)]
@@ -67,6 +78,21 @@ enum Cmd {
         expected_prompt_sha256: String,
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+    /// First-run ergonomics: install harness skills, optional model preset, next steps.
+    ///
+    /// After a binary install, run this once so Claude (`/summoner`), Codex, and
+    /// Grok can load the Summoner skill without per-repo hunting.
+    Setup {
+        /// Install a versioned executor recipe (codex, claude, kimi).
+        #[arg(long, value_enum)]
+        preset: Option<presets::PresetName>,
+        /// Overwrite managed skill files that drifted.
+        #[arg(long)]
+        refresh: bool,
+        /// Also write repo AGENTS.md / contracts in the current directory.
+        #[arg(long)]
+        repo: bool,
     },
     /// Initialize repository contracts, a global preset, or a demo order.
     Init {
@@ -166,6 +192,15 @@ fn dispatch() -> Result<i32> {
             &expected_prompt_sha256,
             &command,
         ),
+        Cmd::Setup {
+            preset,
+            refresh,
+            repo,
+        } => {
+            let report = setup::setup(&std::env::current_dir()?, preset, refresh, repo)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(0)
+        }
         Cmd::Init {
             global,
             preset,
@@ -220,24 +255,45 @@ fn initialize(
     } else {
         init::init(&std::env::current_dir()?, refresh)?
     };
-    let next_steps = if example {
-        vec![
-            "summoner doctor orders/example.toml",
-            "summoner plan orders/example.toml",
-            "summoner run --stream orders/example.toml",
-        ]
+    // Global preset path also drops user skills so older docs still land
+    // harness invoke without a separate setup call.
+    let skills = if global || preset.is_some() || example {
+        Some(skills::install_user_skills(refresh)?)
     } else {
-        vec!["summoner doctor"]
+        None
     };
+    let next_steps: Vec<String> = if example {
+        vec![
+            "summoner doctor orders/example.toml".into(),
+            "summoner plan orders/example.toml".into(),
+            "summoner run --stream orders/example.toml".into(),
+        ]
+    } else if global || preset.is_some() {
+        // Prefer the setup-oriented doctor nudge over the long skill list for
+        // init --global (tests and first-run both read this).
+        vec!["summoner doctor".into()]
+    } else {
+        vec![
+            "summoner doctor".into(),
+            "For harness slash/skill install: summoner setup".into(),
+        ]
+    };
+    let _ = skills; // installed above when global/example; details in setup command
     #[derive(Serialize)]
     struct Output {
         #[serde(flatten)]
         report: init::Report,
-        next_steps: Vec<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        skills: Option<skills::Report>,
+        next_steps: Vec<String>,
     }
     println!(
         "{}",
-        serde_json::to_string_pretty(&Output { report, next_steps })?
+        serde_json::to_string_pretty(&Output {
+            report,
+            skills,
+            next_steps
+        })?
     );
     Ok(0)
 }

@@ -1,3 +1,6 @@
 /target
-/docs/
-/orders/
+
+# Internal design notes — never publish
+docs/plans/
+docs/specs/
+docs/decisions/

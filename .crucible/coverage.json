@@ -1,0 +1,6 @@
+{
+  "cmd": "cargo llvm-cov --lcov --output-path target/lcov.info --bins 2>/dev/null || cargo test -q --bins",
+  "base": "HEAD",
+  "lcovPath": "target/lcov.info",
+  "memoryMb": 4096
+}

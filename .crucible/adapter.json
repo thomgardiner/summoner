@@ -1,0 +1,27 @@
+{
+  "repo": "summoner",
+  "charter": ".crucible/charter.json",
+  "approvals": ".crucible/approvals.json",
+  "gateRunner": {
+    "command": "sh scripts/verify.sh",
+    "file": "scripts/verify.sh",
+    "checkerPattern": "sh (checks/check-[a-z-]+\\.sh)"
+  },
+  "highRiskUnits": [
+    "host",
+    "gate",
+    "tripwires",
+    "order",
+    "doctor",
+    "report"
+  ],
+  "prePush": ".githooks/pre-push",
+  "pinnedConfig": [
+    ".crucible/adapter.json",
+    ".crucible/acceptance.json",
+    ".crucible/mutation.json",
+    ".crucible/coverage.json",
+    ".crucible/flake.json",
+    "scripts/verify.sh"
+  ]
+}

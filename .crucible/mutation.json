@@ -1,0 +1,6 @@
+{
+  "cmd": "cargo mutants --in-diff HEAD --test-tool=nextest --timeout 60 --jobs 2 2>&1 || true",
+  "base": "HEAD",
+  "memoryMb": 4096,
+  "survivorPattern": "^(?:MISSED|TIMEOUT)\\s+([^\\s:]+):(\\d+)(?::\\d+)?:\\s*(.+)$"
+}

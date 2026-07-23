@@ -46,9 +46,9 @@ pub(crate) fn run(
         .timeout_secs
         .unwrap_or_else(|| ctx.config.order_timeout_secs());
     let lease = timeout.saturating_add(120).clamp(1, 86_400);
-    let acquired = ctx.grove.inspection_acquire(worktree, task_id, lease)?;
+    let acquired = ctx.host.inspection_acquire(worktree, task_id, lease)?;
     if acquired.schema_version != 1 || acquired.task_id != task_id {
-        let _ = ctx.grove.inspection_release(worktree, &acquired.capsule_id);
+        let _ = ctx.host.inspection_release(worktree, &acquired.capsule_id);
         bail!("Grove returned an incompatible inspection binding")
     }
     let result = (|| -> Result<ReviewDecision> {
@@ -92,7 +92,7 @@ pub(crate) fn run(
         let argv = reviewer_argv(backend, order, &prompt, &prompt_path, &acquired.path)?;
         let started = Instant::now();
         let execution = ctx
-            .grove
+            .host
             .inspection_exec(worktree, &acquired.capsule_id, timeout, &argv);
         match execution {
             Ok(exec) => evaluate(
@@ -110,7 +110,7 @@ pub(crate) fn run(
             Err(error) => Err(error),
         }
     })();
-    let released = ctx.grove.inspection_release(worktree, &acquired.capsule_id);
+    let released = ctx.host.inspection_release(worktree, &acquired.capsule_id);
     match (result, released) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),

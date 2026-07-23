@@ -1,52 +1,34 @@
 <!-- summoner:agents:v1 -->
 ## Summoner: fleet orchestration contract
 
-You (the session reading this) are the orchestrator. Summoner runs fleets of
-executor agents inside grove-managed worktrees, and it owns the whole grove
-lifecycle for delegated work, so prefer it over hand-driving
-`grove task begin/exec/finish`. Inline changes are different. For those,
-`grove check` / `grove test` remain yours.
+You (the session reading this) are the orchestrator. Summoner dispatches
+**any configured coding-agent CLI** as executors/reviewers under a host-pluggable
+isolation layer (`git` by default; optional **Grove** host for Rust CoW lanes,
+governor, and receipt-bound finish). Prefer Summoner over hand-driving host
+task lifecycle for delegated work. Inline edits stay with this session (and
+`grove check` / `grove test` when the Grove host is in use).
 
-1. Decompose the plan into work orders: one TOML or JSON file per independent
-   task in an `orders/` directory. Decompose along the real package seams
-   (`grove plan --topology` prints them, with the claim scope owning each);
-   keep scopes tight and give every order explicit acceptance criteria and a
-   verify profile. Then `summoner plan orders/` refutes the batch before any
-   worktree is spent: unresolved claim conflicts block, while package
-   couplings and suggested waves are advisory. File-disjoint orders may run in
-   parallel; serialize overlapping scopes with `after`. Revise until `clean`.
-2. Preflight with `summoner doctor`: it checks each configured executor binary
-   and its required environment, and the grove version.
-3. `summoner run orders/` executes the fleet. Each order gets an isolated
-   worktree, a grove task holding its scope claim, the configured executor CLI,
-   then verification. Exit 0: every order verified. Exit 1: at least one order
-   needs review. Exit 2: usage or infrastructure error. Add `--stream` for
-   NDJSON lifecycle events on stdout (final line: a `report` event with the
-   full report); every run also writes the same events to `events.jsonl` in
-   the run directory for live monitoring.
-4. Read the ranked JSON report (stdout, and report.json in the run directory).
-   Review worst-first. Diffs live on each order's branch; verification receipts
-   and log tails are in the report. Re-dispatch failures with revised orders,
-   or `summoner resume <run-id>` to re-run only what did not succeed. Set
-   `fail_fast = N` in `.summoner.toml` so a doomed fleet stops early. Never
-   accept work from an executor's claim alone; the receipts are the evidence.
+1. Decompose into work orders (`orders/*.toml` or `.json`): tight `scope`,
+   concrete `acceptance`, optional `verify_profile` / `executor` / `reviewer`.
+   `summoner plan orders/` refutes claim conflicts before worktrees are spent.
+   File-disjoint orders may run in parallel; overlapping scopes need `after`.
+2. `summoner doctor` — host preflight, git identity, executor binaries and env.
+3. `summoner run orders/` — each order gets an isolated worktree, a scope claim,
+   the configured executor CLI, verification, optional independent review.
+   Exit 0 = all green; 1 = needs human review; 2 = usage/config error.
+   `--stream` for NDJSON lifecycle events.
+4. Read the ranked report. Land with `summoner land` only what passed the bar.
+   Resume crashed fleets with `summoner resume <run-id>`. Never accept work from
+   an executor's claim alone; host receipts + review are the evidence.
 
-Each run owns an immutable `manifest.json` and an authoritative, flushed
-`events.jsonl`; `report.json` is their terminal projection and may be absent
-after a hard crash. `summoner resume <run-id>` uses those run-owned inputs,
-carries only verified/approved results that agree with Grove's finished task,
-and reruns the rest on the recorded branch/session. A nonterminal Grove task
-blocks duplicate dispatch; wait for it or abandon it explicitly, then retry.
+**Hosts:** set `[host] kind = "git"` or `"grove"` in config. Grove is a plugin,
+not a hard requirement. Branch names are host-owned (`smn/...` under git).
 
-Work order fields: `id`, `title`, `brief`, `scope` (paths or `crate:<name>`),
-`acceptance` (list), `verify_profile`, `executor`, `timeout_secs`, `after`.
-Chain dependent work with `after = ["<id>"]`: one run executes the whole DAG,
-and dependents of failed orders come back `skipped`. The chain is ordering
-only, so an order that builds on a dependency's changes must also set
-`base = "grove/smn-<dep-id>"` (branch names are deterministic). Executors are
-argv templates defined by the user, personal ones in
-`~/.config/summoner/config.toml` (template via `summoner init --global`) and
-repo overrides in `.summoner.toml`; `summoner config` prints the resolved
-settings and their sources, and `summoner doctor` says what is missing.
+**Agents of any type:** executors are argv templates in
+`~/.config/summoner/config.toml` (Claude, Codex, Grok, Fable, scripts, …).
+Profiles pick implementer vs reviewer so the orchestrator vendor is not judging
+itself.
 
-<!-- summoner:agents:end -->
+Work order fields: `id`, `title`, `brief`, `scope`, `acceptance`,
+`verify_profile`, `executor`, `reviewer`, `timeout_secs`, `after`, `variants`,
+`base`, `branch`.

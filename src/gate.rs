@@ -72,12 +72,25 @@ pub(crate) fn finish_task(
             return Ok(());
         }
         match ctx
-            .grove
+            .host
             .task_finish(worktree, task_id, None, expected_source_sha256)?
         {
             FinishOutcome::Finished { verification } => {
+                // Hosts must set verification.verified only when required
+                // profiles actually ran and passed. Empty requirements →
+                // completed (honest), not verified.
+                report.outcome = if verification.verified {
+                    Outcome::Verified
+                } else {
+                    Outcome::Completed
+                };
+                if !verification.verified {
+                    report.detail = Some(
+                        "finished without required verification profiles; outcome is completed, not verified"
+                            .into(),
+                    );
+                }
                 report.finish = Some(verification);
-                report.outcome = Outcome::Verified;
                 return Ok(());
             }
             FinishOutcome::Refused {
@@ -119,7 +132,7 @@ pub(crate) fn finish_task(
                     // never mark this verified. Finish with the override on
                     // the record and report it as completed, not verified.
                     let reason = "summoner: repository declares no required verification profiles";
-                    if let FinishOutcome::Finished { verification } = ctx.grove.task_finish(
+                    if let FinishOutcome::Finished { verification } = ctx.host.task_finish(
                         worktree,
                         task_id,
                         Some(reason),

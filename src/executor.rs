@@ -1,11 +1,7 @@
-//! Spawning one executor under grove's supervision. Summoner does no process
-//! group management: `grove task exec --timeout-secs` owns the deadline and
-//! forwards termination signals to the executor's group, so the fleet is
-//! bounded even if summoner itself dies. What lives here is prompt
-//! composition, argv template expansion, stdio wiring, and a backup wait.
+//! Spawning one executor under the active host's execution plan.
 
 use crate::config::{ExecutorBackend, PromptRouting};
-use crate::grove::GroveCli;
+use crate::host::{ExecutionPlan, Host};
 use crate::init::CHARTER;
 use crate::order::Order;
 use anyhow::{Context, Result};
@@ -17,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub struct ExecRequest<'a> {
-    pub grove: &'a GroveCli,
+    pub host: &'a dyn Host,
     pub backend: &'a ExecutorBackend,
     pub order: &'a Order,
     pub task_id: &'a str,
@@ -171,71 +167,89 @@ pub fn run_executor(req: &ExecRequest) -> Result<ExecOutcome> {
     // Spawn the exact verified binary: bare names cannot start .cmd shims on
     // Windows, and the recorded provenance path is what the run evidence claims.
     executor_argv[0] = expected.resolved_path.clone();
-    let argv = req
-        .grove
-        .exec_argv(req.task_id, req.timeout_secs, &executor_argv);
+    let plan = req
+        .host
+        .execution_plan(req.task_id, req.timeout_secs, &executor_argv)?;
 
     let stdout = File::create(req.run_dir.join(format!("{}stdout.log", req.file_prefix)))
         .context("creating stdout.log")?;
     let stderr = File::create(req.run_dir.join(format!("{}stderr.log", req.file_prefix)))
         .context("creating stderr.log")?;
-    let mut command = Command::new(&argv[0]);
-    command
-        .args(&argv[1..])
-        .current_dir(req.worktree)
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-    command.stdin(match req.backend.routing() {
-        // grove task exec passes stdin through untouched to the executor.
-        PromptRouting::Stdin => Stdio::piped(),
-        // Closed stdin so headless CLIs cannot hang waiting for input.
-        _ => Stdio::null(),
-    });
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawning {}", argv[0]))?;
 
-    // A writer thread: a prompt larger than the pipe buffer must not deadlock
-    // against a child that is still starting up. Deliberately never joined —
-    // a rogue descendant that keeps the read end open without reading would
-    // otherwise hang this worker forever. The thread exits on EPIPE once the
-    // readers die; at worst it lingers holding one prompt string.
-    if let Some(mut stdin) = child.stdin.take() {
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(prompt.as_bytes());
-        });
+    match plan {
+        ExecutionPlan::SummonerSupervised { argv, timeout_secs } => {
+            let stdin_bytes = match req.backend.routing() {
+                PromptRouting::Stdin => Some(prompt.as_bytes()),
+                _ => None,
+            };
+            let outcome = crate::host::supervise::run(
+                &argv,
+                req.worktree,
+                timeout_secs,
+                stdin_bytes,
+                Stdio::from(stdout),
+                Stdio::from(stderr),
+                req.shutdown,
+            )?;
+            Ok(ExecOutcome {
+                exit: outcome.exit,
+                backup_killed: outcome.backup_killed,
+            })
+        }
+        ExecutionPlan::HostWrapped {
+            argv,
+            backup_grace_secs,
+        } => {
+            let mut command = Command::new(&argv[0]);
+            command
+                .args(&argv[1..])
+                .current_dir(req.worktree)
+                .stdout(Stdio::from(stdout))
+                .stderr(Stdio::from(stderr));
+            command.stdin(match req.backend.routing() {
+                PromptRouting::Stdin => Stdio::piped(),
+                _ => Stdio::null(),
+            });
+            let mut child = command
+                .spawn()
+                .with_context(|| format!("spawning {}", argv[0]))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                std::thread::spawn(move || {
+                    let _ = stdin.write_all(prompt.as_bytes());
+                });
+            }
+            let backup_deadline = Instant::now()
+                + Duration::from_secs(
+                    req.timeout_secs
+                        .saturating_add(backup_grace_secs)
+                        .min(31_536_000),
+                );
+            let mut terminated = false;
+            let outcome = loop {
+                if let Some(status) = child.try_wait().context("waiting for host-wrapped exec")? {
+                    break ExecOutcome {
+                        exit: status.code(),
+                        backup_killed: false,
+                    };
+                }
+                if req.shutdown.load(Ordering::SeqCst) && !terminated {
+                    terminate_supervisor(&child);
+                    terminated = true;
+                }
+                if Instant::now() >= backup_deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = req.host.kill_supervised(req.task_id, req.worktree);
+                    break ExecOutcome {
+                        exit: None,
+                        backup_killed: true,
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            };
+            Ok(outcome)
+        }
     }
-
-    // grove owns the real deadline; this fires only if the supervisor itself
-    // is broken or wedged. Saturate and cap: a huge configured timeout must
-    // not overflow Instant arithmetic after the fleet is already running.
-    let backup_deadline =
-        Instant::now() + Duration::from_secs(req.timeout_secs.saturating_add(30).min(31_536_000));
-    let mut terminated = false;
-    let outcome = loop {
-        if let Some(status) = child.try_wait().context("waiting for grove task exec")? {
-            break ExecOutcome {
-                exit: status.code(),
-                backup_killed: false,
-            };
-        }
-        if req.shutdown.load(Ordering::SeqCst) && !terminated {
-            // TERM the supervisor; it forwards to the executor's group,
-            // records the interruption, and exits 143.
-            terminate_supervisor(&child);
-            terminated = true;
-        }
-        if Instant::now() >= backup_deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            break ExecOutcome {
-                exit: None,
-                backup_killed: true,
-            };
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    Ok(outcome)
 }
 
 #[cfg(unix)]

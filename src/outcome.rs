@@ -73,7 +73,7 @@ pub(crate) fn finalize(
     let _ = ctx.events.emit_report("order_checkpoint", report);
 
     if let Some(reason) = abandon_reason
-        && let Err(error) = ctx.grove.task_abandon(worktree, task_id, reason)
+        && let Err(error) = ctx.host.task_abandon(worktree, task_id, reason)
     {
         report.detail = Some(match report.detail.take() {
             Some(detail) => format!("{detail}; abandon failed: {error:#}"),
@@ -110,7 +110,7 @@ pub(crate) fn finalize(
 }
 
 pub(crate) fn release(ctx: &Ctx, worktree: &Path, report: &mut OrderReport) {
-    match ctx.grove.worktree_release(&ctx.repo, worktree) {
+    match ctx.host.worktree_release(&ctx.repo, worktree) {
         Ok(outcome) => {
             report.saved_to = outcome.saved_to;
             if report.branch.is_none() {
@@ -221,7 +221,7 @@ pub(crate) fn grove_verify(
     task_id: &str,
 ) -> Result<VerifySummary> {
     let ignored_before = ignored_paths(worktree)?;
-    let verification = ctx.grove.verify(worktree, profile, task_id);
+    let verification = ctx.host.verify(worktree, profile, task_id);
     let cleanup = clean_new_ignored_paths(worktree, &ignored_before);
     let summary = verification?;
     cleanup?;
@@ -328,7 +328,7 @@ pub(crate) fn head_and_tail(path: &Path) -> Option<String> {
 
 #[cfg(unix)]
 pub(crate) fn kill_recorded_group(ctx: &Ctx, task_id: &str, worktree: &Path) {
-    let Ok(status) = ctx.grove.task_status(worktree) else {
+    let Ok(status) = ctx.host.task_status(worktree) else {
         return;
     };
     let Some(tasks) = status["tasks"].as_array() else {

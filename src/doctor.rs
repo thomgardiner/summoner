@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::grove::GroveCli;
+use crate::host::{self, Host, HostCapabilities, HostInfo};
 use crate::{lifecycle, order};
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -9,7 +10,10 @@ use std::process::Command;
 
 #[derive(Serialize)]
 struct Report {
-    grove: Grove,
+    host: HostReport,
+    /// Present when host.kind is grove (Grove capability pin details).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grove: Option<GroveDetail>,
     repo: Repo,
     #[serde(skip_serializing_if = "Option::is_none")]
     orders: Option<Orders>,
@@ -22,20 +26,32 @@ struct Report {
 }
 
 #[derive(Serialize)]
+struct HostReport {
+    kind: String,
+    version: String,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<HostCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GroveDetail {
+    bin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<crate::grove::Capabilities>,
+}
+
+#[derive(Serialize)]
 struct Repo {
     git_repo: bool,
     git_identity: bool,
     ok: bool,
-}
-
-#[derive(Serialize)]
-struct Grove {
-    bin: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    capabilities: Option<crate::grove::Capabilities>,
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -54,6 +70,8 @@ struct Verification {
     profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     configured: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 pub fn run(config: &Config, paths: &[PathBuf], allow_unknown_auth: bool) -> Result<i32> {
@@ -88,15 +106,33 @@ fn inspect(
     let has_orders = loaded.is_some();
     let mut notes = Vec::new();
     let mut next = Vec::new();
-    let grove = grove(config, &mut next);
+    let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (host, grove) = host_report(config, &repo_path, &mut notes, &mut next);
     let repo = repo(&mut next);
-    let (orders, roles) = orders(config, loaded, &mut notes)?;
+    let (orders, roles) = orders(config, loaded, &host.kind, &mut notes)?;
     let default_executor = config.default_executor();
     if !has_orders && default_executor.is_none() {
         next.push(
             "select a default with `summoner init --global --preset codex` (or name an executor in every order)"
                 .to_string(),
         );
+    }
+    let skill_paths = crate::skills::installed_paths();
+    if skill_paths.is_empty() {
+        notes.push(
+            "no harness skill installed (Claude /summoner, Codex, Agents, Grok); run `summoner setup`"
+                .into(),
+        );
+        next.push("summoner setup --preset codex   # skills + executor recipe".into());
+    } else {
+        notes.push(format!(
+            "harness skills: {}",
+            skill_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     let executors = lifecycle::inspect(config, &roles, &mut next, allow_unknown_auth)?;
     let roles_ok = !roles.is_empty()
@@ -107,8 +143,9 @@ fn inspect(
         || default_executor
             .as_ref()
             .is_some_and(|name| config.executors.contains_key(name));
-    let ok = grove.ok && repo.ok && orders_ok && default_ok && roles_ok;
-    let report = Report {
+    let ok = host.ok && repo.ok && orders_ok && default_ok && roles_ok;
+    Ok(Report {
+        host,
         grove,
         repo,
         orders,
@@ -117,13 +154,13 @@ fn inspect(
         notes,
         next_steps: next,
         ok,
-    };
-    Ok(report)
+    })
 }
 
 fn orders(
     config: &Config,
     loaded: Option<&[order::Order]>,
+    host_kind: &str,
     notes: &mut Vec<String>,
 ) -> Result<(Option<Orders>, BTreeSet<String>)> {
     let Some(loaded) = loaded else {
@@ -137,8 +174,7 @@ fn orders(
     }
     let mut problems = order::validate(loaded, config);
     let roles = lifecycle::roles(loaded, config);
-    let profiles = crate::config::grove_profiles(&std::env::current_dir()?)?;
-    let verification = verification(loaded, config, &profiles, notes, &mut problems);
+    let verification = verification(loaded, config, host_kind, notes, &mut problems);
     let ok = problems.is_empty();
     Ok((
         Some(Orders {
@@ -155,64 +191,183 @@ fn orders(
 fn verification(
     loaded: &[order::Order],
     config: &Config,
-    profiles: &crate::config::GroveProfiles,
+    host_kind: &str,
     notes: &mut Vec<String>,
     problems: &mut Vec<String>,
 ) -> Vec<Verification> {
-    loaded.iter().map(|item| {
-        let profile = item
-            .verify_profile
-            .clone()
-            .or_else(|| config.default_verify_profile.clone());
-        let configured = profile.as_ref().map(|name| profiles.names.contains(name));
-        if let Some(name) = profile.as_ref()
-            && configured == Some(false)
-        {
-            problems.push(format!(
-                "{}: verification profile {name:?} is not defined with a command in {}",
-                item.source.display(),
-                profiles
-                    .path
-                    .as_ref()
-                    .map_or_else(|| ".grove.toml".to_string(), |path| path.display().to_string())
-            ));
-        }
-        if profile.is_none() {
-            notes.push(format!(
-                "order {:?} has no verification profile; a successful run stops at completed, not verified",
-                item.id
-            ));
-        }
-        Verification {
-            order: item.id.clone(),
-            profile,
-            configured,
-        }
-    }).collect()
+    let git_profiles = config
+        .verification
+        .as_ref()
+        .map(|v| v.profiles.keys().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default();
+    let grove = crate::config::grove_profiles(&std::env::current_dir().unwrap_or_default())
+        .unwrap_or(crate::config::GroveProfiles {
+            path: None,
+            names: BTreeSet::new(),
+            selected: None,
+        });
+
+    loaded
+        .iter()
+        .map(|item| {
+            let profile = item
+                .verify_profile
+                .clone()
+                .or_else(|| config.default_verify_profile.clone());
+            let (configured, source) = match profile.as_ref() {
+                None => (None, None),
+                Some(name) if host_kind == "git" => {
+                    let ok = git_profiles.contains(name);
+                    if !ok {
+                        // Vacuous pass when no profiles defined and name is unused — still warn.
+                        if git_profiles.is_empty() {
+                            problems.push(format!(
+                                "{}: verification profile {name:?} is not defined under [verification.profiles]; git host will not invent a green check",
+                                item.source.display()
+                            ));
+                            (Some(false), Some("[verification] in summoner config".into()))
+                        } else {
+                            problems.push(format!(
+                                "{}: verification profile {name:?} is not defined under [verification.profiles] in summoner config",
+                                item.source.display()
+                            ));
+                            (Some(false), Some("[verification] in summoner config".into()))
+                        }
+                    } else {
+                        (Some(true), Some("[verification] in summoner config".into()))
+                    }
+                }
+                Some(name) => {
+                    let ok = grove.names.contains(name);
+                    if !ok {
+                        problems.push(format!(
+                            "{}: verification profile {name:?} is not defined with a command in {}",
+                            item.source.display(),
+                            grove.path.as_ref().map_or_else(
+                                || ".grove.toml".to_string(),
+                                |path| path.display().to_string()
+                            )
+                        ));
+                    }
+                    (
+                        Some(ok),
+                        Some(
+                            grove
+                                .path
+                                .as_ref()
+                                .map_or_else(|| ".grove.toml".into(), |p| p.display().to_string()),
+                        ),
+                    )
+                }
+            };
+            if profile.is_none() {
+                notes.push(format!(
+                    "order {:?} has no verification profile; a successful run stops at completed, not verified",
+                    item.id
+                ));
+            }
+            Verification {
+                order: item.id.clone(),
+                profile,
+                configured,
+                source,
+            }
+        })
+        .collect()
 }
 
-fn grove(config: &Config, next: &mut Vec<String>) -> Grove {
-    let bin = config.grove_bin();
+fn host_report(
+    config: &Config,
+    repo: &std::path::Path,
+    notes: &mut Vec<String>,
+    next: &mut Vec<String>,
+) -> (HostReport, Option<GroveDetail>) {
+    let resolved = host::resolve(config, repo);
+    if let Some(notice) = &resolved.notice {
+        notes.push(notice.clone());
+    }
+    if resolved.kind == "git" {
+        if repo.join(".grove.toml").is_file() {
+            notes.push(
+                "`.grove.toml` present: set [host] kind = \"grove\" to use CoW lanes, claims, and receipt-bound finish for multi-agent Rust"
+                    .into(),
+            );
+        }
+        return match host::open(config, repo).and_then(|h| h.preflight()) {
+            Ok(info) => (host_from_info(info, resolved.notice), None),
+            Err(error) => {
+                next.push(format!("git host preflight failed: {error:#}"));
+                (
+                    HostReport {
+                        kind: "git".into(),
+                        version: String::new(),
+                        ok: false,
+                        state_root: None,
+                        capabilities: None,
+                        error: Some(format!("{error:#}")),
+                        notice: resolved.notice,
+                    },
+                    None,
+                )
+            }
+        };
+    }
+
+    let bin = resolved
+        .grove_bin
+        .clone()
+        .unwrap_or_else(|| config.grove_bin());
     let cli = GroveCli::new(bin.clone());
     match cli.preflight() {
-        Ok(capabilities) => Grove {
-            bin,
-            capabilities: Some(capabilities),
-            ok: true,
-            error: None,
-        },
+        Ok(capabilities) => {
+            let version = cli.version().unwrap_or_else(|_| bin.clone());
+            let info = HostInfo {
+                kind: "grove".into(),
+                version: version.clone(),
+                state_root: None,
+                capabilities: host::GroveHost::new(bin.clone()).capabilities(),
+            };
+            (
+                host_from_info(info, resolved.notice),
+                Some(GroveDetail {
+                    bin,
+                    capabilities: Some(capabilities),
+                }),
+            )
+        }
         Err(error) => {
             next.push(
-                "install a compatible current Grove release, ensure `grove` is on PATH, then rerun `summoner doctor`"
-                    .to_string(),
+                "install a compatible Grove release and put `grove` on PATH, or set [host] kind = \"git\" for independence"
+                    .into(),
             );
-            Grove {
-                bin,
-                capabilities: None,
-                ok: false,
-                error: Some(format!("{error:#}")),
-            }
+            (
+                HostReport {
+                    kind: "grove".into(),
+                    version: String::new(),
+                    ok: false,
+                    state_root: None,
+                    capabilities: None,
+                    error: Some(format!("{error:#}")),
+                    notice: resolved.notice,
+                },
+                Some(GroveDetail {
+                    bin,
+                    capabilities: None,
+                }),
+            )
         }
+    }
+}
+
+fn host_from_info(info: HostInfo, notice: Option<String>) -> HostReport {
+    HostReport {
+        kind: info.kind,
+        version: info.version,
+        ok: true,
+        state_root: info.state_root.map(|p| p.display().to_string()),
+        capabilities: Some(info.capabilities),
+        error: None,
+        notice,
     }
 }
 

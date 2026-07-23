@@ -124,23 +124,29 @@ impl<'a> OrderRun<'a> {
     ) -> Result<Option<Self>> {
         let backend = &ctx.config.executors[executor_name];
         let agent = order.agent();
-        let worktree = ctx.grove.worktree_acquire(
-            &ctx.repo,
-            &agent,
-            order.branch.as_deref(),
-            order.base.as_deref(),
-        )?;
+        let worktree = ctx.host.worktree_acquire(crate::host::WorktreeRequest {
+            repo: &ctx.repo,
+            run_id: &ctx.run_id,
+            order_id: &order.id,
+            attempt: 1,
+            agent: &agent,
+            branch: order.branch.as_deref(),
+            base: order.base.as_deref(),
+        })?;
         report.worktree = Some(worktree.display().to_string());
         report.branch = git(&worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
         report.base_commit = git(&worktree, &["rev-parse", "HEAD"]).ok();
 
-        match ctx.grove.task_begin(
-            &worktree,
-            &agent,
-            &order.title,
-            &order.scope,
-            order.claim_group.as_deref(),
-        )? {
+        match ctx.host.task_begin(crate::host::TaskBeginRequest {
+            worktree: &worktree,
+            run_id: &ctx.run_id,
+            order_id: &order.id,
+            attempt: 1,
+            agent: &agent,
+            title: &order.title,
+            scope: &order.scope,
+            claim_group: order.claim_group.as_deref(),
+        })? {
             BeginOutcome::Begun { task } => report.task_id = Some(task.id),
             BeginOutcome::Conflict { conflicts } => {
                 report.outcome = Outcome::Blocked;
@@ -384,7 +390,7 @@ impl<'a> OrderRun<'a> {
         };
         let exec_started = Instant::now();
         let exec = executor::run_executor(&ExecRequest {
-            grove: &self.ctx.grove,
+            host: self.ctx.host.as_ref(),
             backend: self.backend,
             order: self.order,
             task_id: &self.task_id,
@@ -576,13 +582,16 @@ impl<'a> OrderRun<'a> {
             return Ok(false);
         };
         self.feedback = revision_feedback(report);
-        match self.ctx.grove.task_begin(
-            &self.worktree,
-            &self.agent,
-            &self.order.title,
-            &self.order.scope,
-            self.order.claim_group.as_deref(),
-        )? {
+        match self.ctx.host.task_begin(crate::host::TaskBeginRequest {
+            worktree: &self.worktree,
+            run_id: &self.ctx.run_id,
+            order_id: &self.order.id,
+            attempt: report.attempts.saturating_add(1),
+            agent: &self.agent,
+            title: &self.order.title,
+            scope: &self.order.scope,
+            claim_group: self.order.claim_group.as_deref(),
+        })? {
             BeginOutcome::Begun { task } => {
                 self.task_id = task.id.clone();
                 report.task_id = Some(task.id);

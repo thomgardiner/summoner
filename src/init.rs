@@ -20,6 +20,7 @@ const AGENTS_SECTION: &str = include_str!("../assets/agents-section.md");
 const SKILL: &str = include_str!("../assets/skill.md");
 const STARTER_TOML: &str = include_str!("../assets/summoner-starter.toml");
 const EXAMPLE_ORDER: &str = include_str!("../assets/example-order.toml");
+const EXAMPLE_ORDER_GIT: &str = include_str!("../assets/example-order-git.toml");
 const GROVE_DEMO: &str = include_str!("../assets/grove-demo.toml");
 
 pub const CHARTER: &str = include_str!("../assets/charter.md");
@@ -64,8 +65,22 @@ pub(crate) fn onboard(
     } else {
         Report::default()
     };
-    let grove = GroveCli::new(resolved.config.grove_bin());
-    match example(workspace, false, &grove) {
+    let host = crate::host::resolve(&resolved.config, workspace);
+    let explicit_git = resolved
+        .config
+        .host
+        .as_ref()
+        .and_then(|h| h.kind.as_deref())
+        .is_some_and(|k| k.eq_ignore_ascii_case("git"));
+    // Prefer the resolved host binary; fall back to `grove` on PATH so a Rust
+    // example can still generate Cargo.lock when auto-resolve chose git only
+    // because the repo has no .grove.toml yet.
+    let grove_bin = host
+        .grove_bin
+        .clone()
+        .or_else(|| (!explicit_git).then(|| "grove".into()));
+    let grove = grove_bin.as_ref().map(|bin| GroveCli::new(bin.clone()));
+    match example(workspace, false, grove.as_ref(), &host.kind, explicit_git) {
         Ok(example) => {
             report.merge(example);
             Ok(report)
@@ -143,11 +158,38 @@ impl GlobalSnapshot {
     }
 }
 
-pub fn example(workspace: &Path, refresh: bool, grove: &GroveCli) -> Result<Report> {
-    let mut report = ensure_demo_profile(workspace)?;
+pub fn example(
+    workspace: &Path,
+    refresh: bool,
+    grove: Option<&GroveCli>,
+    host_kind: &str,
+    explicit_git: bool,
+) -> Result<Report> {
+    let rust_workspace = workspace.join("Cargo.toml").is_file();
+    // Explicit [host] kind = "git" stays pure-git. Otherwise Rust trees still
+    // get a Grove demo profile (and lockfile when a Grove binary is available).
+    let use_grove_demo = if explicit_git {
+        false
+    } else {
+        host_kind == "grove" || rust_workspace
+    };
+    let mut report = if use_grove_demo {
+        ensure_demo_profile(workspace)?
+    } else {
+        Report::default()
+    };
     if report.written.iter().any(|path| path == ".grove.toml")
         && !workspace.join("Cargo.lock").is_file()
     {
+        let Some(grove) = grove else {
+            // Git-first path: leave demo grove config without lockfile gen.
+            // User can run cargo generate-lockfile or switch host to grove later.
+            report
+                .skipped
+                .push("Cargo.lock (no grove binary for lockfile gen)".into());
+            report.merge(init(workspace, refresh)?);
+            return write_example_order(workspace, report, false);
+        };
         if let Err(error) = grove.cargo_generate_lockfile(workspace) {
             std::fs::remove_file(workspace.join(".grove.toml"))?;
             let lockfile = workspace.join("Cargo.lock");
@@ -159,28 +201,40 @@ pub fn example(workspace: &Path, refresh: bool, grove: &GroveCli) -> Result<Repo
         report.written.push("Cargo.lock".to_string());
     }
     report.merge(init(workspace, refresh)?);
+    write_example_order(
+        workspace,
+        report,
+        use_grove_demo && workspace.join(".grove.toml").is_file(),
+    )
+}
+
+fn write_example_order(workspace: &Path, mut report: Report, grove_style: bool) -> Result<Report> {
     let path = workspace.join("orders").join("example.toml");
     if path.exists() {
         report.skipped.push("orders/example.toml".to_string());
-    } else {
-        std::fs::create_dir_all(path.parent().context("example order has no parent")?)
-            .context("creating orders directory")?;
-        std::fs::write(&path, example_order(workspace)?).context("writing orders/example.toml")?;
-        report.written.push("orders/example.toml".to_string());
+        return Ok(report);
     }
+    std::fs::create_dir_all(path.parent().context("example order has no parent")?)
+        .context("creating orders directory")?;
+    let body = if grove_style {
+        example_order_grove(workspace)?
+    } else {
+        EXAMPLE_ORDER_GIT.to_string()
+    };
+    std::fs::write(&path, body).context("writing orders/example.toml")?;
+    report.written.push("orders/example.toml".to_string());
     Ok(report)
 }
 
-fn example_order(workspace: &Path) -> Result<String> {
+fn example_order_grove(workspace: &Path) -> Result<String> {
     let profiles = crate::config::grove_profiles(workspace)?;
     let profile = profiles.selected.context(
         "the existing .grove.toml has no single required usable verification profile; select exactly one required profile before creating the example",
     )?;
-    let value = EXAMPLE_ORDER.replace(
+    Ok(EXAMPLE_ORDER.replace(
         "verify_profile = \"rust-check\"",
         &format!("verify_profile = {profile:?}"),
-    );
-    Ok(value)
+    ))
 }
 
 fn ensure_demo_profile(workspace: &Path) -> Result<Report> {
@@ -196,7 +250,8 @@ fn ensure_demo_profile(workspace: &Path) -> Result<Report> {
         return Ok(report);
     }
     if !workspace.join("Cargo.toml").is_file() {
-        anyhow::bail!("the example requires a Rust workspace with Cargo.toml")
+        // Non-Rust: skip grove demo; git-host example order is enough.
+        return Ok(report);
     }
     std::fs::write(workspace.join(".grove.toml"), GROVE_DEMO).context("writing .grove.toml")?;
     report.written.push(".grove.toml".to_string());

@@ -17,10 +17,22 @@ pub(crate) struct Manifest {
     pub(crate) start_head: String,
     pub(crate) selected_profile: Option<String>,
     pub(crate) summoner_version: String,
+    /// Legacy string still written for older tooling; prefer `host`.
     pub(crate) grove_version: String,
+    /// Isolation host that executed this run (pinned for resume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) host: Option<HostRecord>,
     pub(crate) settings: Settings,
     pub(crate) orders: Vec<ManifestOrder>,
     pub(crate) backends: BTreeMap<String, Backend>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(crate) struct HostRecord {
+    pub(crate) kind: String,
+    pub(crate) version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) state_root: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -90,6 +102,16 @@ pub(crate) struct Replay {
     pub(crate) config: Config,
     pub(crate) orders: Vec<Order>,
     pub(crate) selected_profile: Option<String>,
+}
+
+/// Host kind pinned in the run manifest, if present.
+pub(crate) fn recorded_host_kind(dir: &Path) -> Result<Option<String>> {
+    let path = dir.join("manifest.json");
+    let manifest: Manifest = serde_json::from_slice(
+        &std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+    )
+    .context("parsing immutable run manifest")?;
+    Ok(manifest.host.map(|h| h.kind))
 }
 
 pub(crate) fn replay(dir: &Path, run_id: &str, current: &Config) -> Result<Replay> {
@@ -163,7 +185,17 @@ pub(crate) fn bound_config(manifest: &Manifest, current: &Config) -> Result<Conf
         max_parallel: Some(manifest.settings.max_parallel),
         default_verify_profile: manifest.settings.default_verify_profile.clone(),
         order_timeout_secs: Some(manifest.settings.order_timeout_secs),
-        grove_bin: Some(current.grove_bin()),
+        // Keep Option, not grove_bin() — forcing Some("grove") made resume
+        // always select the grove host via the legacy grove_bin rule.
+        grove_bin: current.grove_bin.clone(),
+        host: current.host.clone().or_else(|| {
+            manifest.host.as_ref().map(|h| crate::config::HostSettings {
+                kind: Some(h.kind.clone()),
+                bin: None,
+                worktree_root: None,
+            })
+        }),
+        verification: current.verification.clone(),
         keep_failed_worktrees: Some(manifest.settings.keep_failed_worktrees),
         fail_fast: manifest.settings.fail_fast,
         revise: Some(manifest.settings.revise),

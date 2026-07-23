@@ -1,96 +1,88 @@
 ---
 name: summoner
-description: Dispatch a fleet of executor agents (any model CLI) over grove-managed worktrees from work orders with tight acceptance criteria. Use when delegating parallel implementation work to fast models while this session orchestrates and reviews.
+description: >
+  Dispatch a fleet of coding-agent CLIs (Claude, Codex, Grok, Fable, …) from
+  work orders. Orchestrate while heterogeneous executors and reviewers run under
+  Summoner. Isolation is host-pluggable (git by default; Grove optional for Rust
+  CoW lanes and receipts). Invoke with /summoner (Claude) or by asking to run a
+  Summoner fleet. Use when delegating parallel implementation, multi-model
+  races, or cross-vendor review.
 ---
+<!-- summoner:skill:v1 -->
 
-# Summoner: run an executor fleet
+# Summoner
 
-You are the orchestrator. Summoner is the deterministic dispatch layer under
-you, owning the whole grove lifecycle for each order: worktree, scope claim,
-durable task, verification, salvage. You write work orders. You review
-outcomes. Everything between is Summoner's job.
+You are the **orchestrator**. Summoner is the deterministic fleet layer: work
+orders in, ranked evidence out. Shell the `summoner` CLI; do not invent a
+parallel dispatch path.
+
+## Invoke (any harness)
+
+| Harness | How |
+| --- | --- |
+| Claude Code | `/summoner` or “run a Summoner fleet” |
+| Codex | skill loads from `~/.codex/skills/summoner`; ask to plan/run orders |
+| Shell | `summoner plan orders/` → `summoner run --stream orders/` |
+| First install | `summoner setup --preset codex` (or `claude` / `kimi`) |
+
+## Framing
+
+- Any configured CLI can be an **executor** or a **reviewer** (argv templates).
+- This session is the orchestrator; profiles avoid a vendor grading itself.
+- **Hosts** own isolation: `git` (default independence) or `grove` (Rust depth).
+- You do not hand-drive host task lifecycle for fleet work; Summoner does.
+
+## Hosts
+
+```toml
+[host]
+kind = "git"     # no Grove required (Unix)
+# kind = "grove" # optional: CoW lanes, governor, receipt finish
+# bin = "grove"
+```
+
+Resolution: explicit `kind` → legacy `grove_bin` → `.grove.toml` + grove on PATH → else `git`.
 
 ## Workflow
 
-1. **Decompose.** Split the plan into independent work orders, one file per
-   task, in an `orders/` directory. TOML or JSON:
+1. **Decompose.** One independent order per file under `orders/`:
 
    ```toml
-   id     = "auth-refactor"                  # [a-z0-9_-]+, becomes branch grove/smn-<id>
-   title  = "Extract token validation into auth-core"
+   id     = "auth-refactor"                  # [a-z0-9_-]+
+   title  = "Extract token validation"
    brief  = """Full instructions for the executor."""
-   scope  = ["crate:auth-core", "src/api/token.rs"]   # paths or crate:<name>
-   acceptance     = ["grove verify fast passes", "no new public API"]
-   verify_profile = "fast"                   # optional; grove profile to run
-   executor       = "agent-a"                # optional; else config default
-   timeout_secs   = 900                      # optional
+   scope  = ["src/auth.rs"]                  # paths; crate:<name> needs grove host
+   acceptance     = ["tests pass", "no new public API"]
+   verify_profile = "fast"                   # optional
+   executor       = "codex"                  # any configured name
+   reviewer       = "claude-review"          # optional independent gate
+   timeout_secs   = 900
+   after          = ["prior-id"]             # DAG
    ```
 
-   Decompose against the real workspace, not intuition: `grove plan
-   --topology` prints the package map (names, paths, dependency edges, and
-   the claim scope owning each). Tight scope and concrete acceptance criteria
-   are what keep fast models honest. Dependent work chains with
-   `after = ["<id>"]` (one run executes the DAG; dependents of failures are
-   skipped), and an order that builds on a dependency's changes also sets
-   `base = "grove/smn-<dep-id>"`. For a hard or ambiguous order, set
-   `variants = ["agent-a", "agent-b"]` instead of `executor`: each named executor
-   attempts the order independently on its own branch (same scope, shared
-   claim group), and you review the attempts and land the best one.
+   Multi-model race: `variants = ["codex", "claude"]` instead of `executor`.
 
-   Then refute your decomposition before spending worktrees on it:
-   `summoner plan orders/` resolves every scope exactly as dispatch will and
-   reports claim conflicts, package couplings, and suggested execution waves.
-   Package couplings are advisory because file-disjoint orders have isolated
-   worktrees and build lanes. Overlapping scopes need an `after` edge; an
-   overlap already ordered by the declared DAG is clean. Revise until the
-   verdict is `clean`.
+   `summoner plan orders/` refutes claim conflicts before worktrees are spent.
 
-2. **Preflight.** `summoner doctor` checks every configured executor binary,
-   required environment variables, and the grove version. Fix what it flags
-   before dispatching.
+2. **Preflight.** `summoner doctor` — host, git identity, executors, env.
 
-3. **Dispatch.** `summoner run orders/`. Orders run in parallel (config
-   `max_parallel`), each in its own grove worktree and task. Mixing executors
-   (any configured CLI or model) in one run is normal. For long
-   fleets, `--stream` emits NDJSON lifecycle events as they happen (the
-   `order_dispatched` event carries the log paths to tail) and ends with a
-   `report` event instead of the pretty report.
+3. **Dispatch.** `summoner run orders/` (optional `--stream` NDJSON).
 
-4. **Review.** The report (stdout and `report.json` in the run directory) is
-   ranked worst-first: `error`, `blocked`, `stalled`, `executor_failed`,
-   `scope_violation`, `unverified`, `review_failed`, `rejected`,
-   `interrupted`, `skipped`, `completed`, `verified`, `approved`.
-   With `default_reviewer` configured (or per-order `reviewer`), verified
-   work is judged by an independent backend — fresh context, diff and
-   requirements only — and lands as `approved` or `rejected` with findings;
-   deterministic `tripwires` (deleted tests, skip markers, verification-config
-   edits) ride in each entry. `[profiles.<name>]` config tables pick the
-   executor/reviewer policy for an invoking environment; select one with
-   `--profile <name>`, `SUMMONER_PROFILE`, or a config pin.
-   Each order carries its branch, diff stats, verification receipts, acceptance
-   criteria, and log tails. Review the diff on the order's branch against its
-   acceptance criteria before landing anything. Re-dispatch failures with a
-   revised order; do not hand-patch inside the executor's worktree.
-   With `revise = N` configured, rejected/unverified orders already
-   re-dispatched with their evidence (resuming the executor's session when
-   the backend defines `resume_argv`) before reaching the report — the
-   `attempts` field says how many tries an entry took, and `session_id`
-   lets you resume the executor's context manually. `run_token_budget`
-   and per-order `max_tokens` bound the spend; `summoner watch` shows the
-   fleet live. Before decomposing, check `summoner scorecard` — pick
-   executors from their per-repo track record, not habit.
+4. **Review.** Ranked report + receipts; never trust executor self-claims alone.
+   `summoner resume <run-id>` after crashes. `summoner land` for gated integrate.
 
-5. **Recover.** `summoner resume <run-id>` uses the run-owned immutable
-   manifest and authoritative journal; do not recreate or edit the original
-   orders first. It carries only `verified`/`approved` work whose finished
-   Grove task agrees, and reruns everything else on its recorded branch and
-   executor session. If a nonterminal Grove task still owns the work, resume
-   stops instead of dispatching a duplicate; wait for it or abandon it
-   explicitly, then retry.
+## Evidence
 
-## Rules
+Each run directory: immutable `manifest.json`, authoritative `events.jsonl`,
+terminal `report.json`. Resume uses run-owned inputs + host durable task state.
 
-- Never mark delegated work done from an executor's output alone; receipts and
-  your own diff review are the evidence.
-- Do not run plain cargo in summoner worktrees; grove owns build isolation.
-- Exit codes: 0 all verified, 1 review needed, 2 usage/infra error.
+## Honest outcomes
+
+- `verified` = required profiles ran and passed.
+- No verification configured → `completed` (not a fake green).
+- Protected config touch (e.g. `.grove.toml`) caps at `unverified`.
+
+## Non-goals
+
+Summoner is not a chat product, model router, or GUI. It is the control plane
+under whatever model is best this week.

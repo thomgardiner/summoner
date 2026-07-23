@@ -1,0 +1,48 @@
+{
+  "repo": "summoner",
+  "build": {
+    "cmd": "cargo build -q",
+    "timeoutSec": 600
+  },
+  "boot": {
+    "cmd": "cargo run -q -- --help",
+    "timeoutSec": 120,
+    "oracle": {
+      "stdoutMatch": "summoner",
+      "stdoutForbid": "panicked|thread 'main' panicked"
+    }
+  },
+  "drive": [
+    {
+      "name": "doctor-host",
+      "cmd": "cargo run -q -- doctor",
+      "timeoutSec": 120,
+      "oracle": {
+        "stdoutMatch": "\"ok\"",
+        "stdoutForbid": "panicked"
+      }
+    },
+    {
+      "name": "check-honest",
+      "cmd": "crucible check",
+      "timeoutSec": 60,
+      "oracle": {
+        "stdoutMatch": "every gate is honest",
+        "stdoutForbid": "gate violation"
+      }
+    },
+    {
+      "name": "host-honesty-checker",
+      "cmd": "sh checks/check-host-honesty.sh",
+      "timeoutSec": 30,
+      "oracle": {
+        "stdoutMatch": "check-host-honesty: ok"
+      }
+    }
+  ],
+  "trust": {
+    "testRoots": ["src", "tests"],
+    "testPattern": "(_tests\\.rs$|/tests/.*\\.rs$)",
+    "mockMarkers": ["mockall", "automock", "mock::"]
+  }
+}

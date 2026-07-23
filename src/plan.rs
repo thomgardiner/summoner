@@ -4,7 +4,7 @@
 //! Revise until clean, then `summoner run` the same files.
 
 use crate::config::Config;
-use crate::grove::GroveCli;
+use crate::host;
 use crate::order::{self, Order};
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -32,14 +32,14 @@ pub struct MissingAfter {
 }
 
 pub fn plan(config: &Config, paths: &[PathBuf]) -> Result<i32> {
-    let grove = GroveCli::new(config.grove_bin());
-    grove.preflight()?;
+    let repo = std::env::current_dir().context("resolving current directory")?;
+    let host = host::open(config, &repo)?;
+    host.preflight()?;
     let orders = order::load(paths)?;
     let problems = order::validate(&orders, config);
 
-    // Variant siblings carry their claim group so grove's partition treats
-    // their deliberate overlap as a race, not a conflict — exactly as the
-    // claim registry will at dispatch.
+    // Variant siblings carry their claim group so partition treats their
+    // deliberate overlap as a race, not a conflict — matching claim registry.
     let sets: Vec<serde_json::Value> = orders
         .iter()
         .map(|order| {
@@ -50,8 +50,7 @@ pub fn plan(config: &Config, paths: &[PathBuf]) -> Result<i32> {
             })
         })
         .collect();
-    let repo = std::env::current_dir().context("resolving current directory")?;
-    let partition = grove.partition(&repo, &serde_json::Value::Array(sets))?;
+    let partition = host.partition(&repo, &serde_json::Value::Array(sets))?;
 
     let missing_after = missing_after(&orders, &partition);
     let clean = problems.is_empty() && missing_after.is_empty();

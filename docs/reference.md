@@ -200,4 +200,31 @@ redraws it live. Two sections, both folded from best-effort NDJSON:
 - **Grove coordination** — Grove's per-repo event streams under its cache root
   (`events/*.jsonl`, resolved via `grove config`), one line each: the repo slug,
   last activity, and a tally of recent events by category (`task`, `verify`,
-  `claim`, ...). A torn line is skipped, never blanking the pane.
+  `claim`, ...). A torn line is skipped, never blanking the pane. Empty when
+  Grove is not installed.
+
+## Hosts
+
+Isolation is a plugin. `doctor` reports a top-level `host` object (`kind`,
+`version`, `ok`, `capabilities`); when `kind` is `grove`, a nested `grove`
+object carries the Grove capability pin.
+
+| | **git** | **grove** |
+| --- | --- | --- |
+| When | Default when no `.grove.toml` / grove on PATH, or `[host] kind = "git"` | Explicit `[host] kind = "grove"`, legacy `grove_bin`, or `.grove.toml` + `grove` on PATH |
+| Worktrees | `git worktree` under a Summoner cache root | `grove worktree acquire` |
+| Claims / tasks | Local ledger + flock registry | Grove registry + durable task records |
+| Deadline | Summoner process-group supervision (Unix; Windows not yet) | `grove task exec --timeout-secs` |
+| Verify | Optional `[verification]`; missing profile is a **fail**, not a free pass. No required profiles → finish is `completed`, not `verified` | `.grove.toml` profiles + receipts |
+| CoW lanes / governor | No | Yes |
+| Inspection capsule | Weak (review in worktree) | Private Grove capsule |
+
+Resolution order: explicit `[host] kind` → legacy `grove_bin` → `.grove.toml`
+plus grove on PATH → **git**.
+
+Resume pins the host kind recorded in `manifest.json`. A config that resolves
+to a different host fails closed until you match the recorded kind.
+
+Rust monorepos: prefer the grove host. Multi-agent rebuild tax and claim-free
+collisions are what Grove is for; Summoner alone is enough for process and
+multi-vendor dispatch.

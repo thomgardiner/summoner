@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::grove::GroveCli;
+use crate::host;
 use crate::order::Order;
 use crate::report::{OrderReport, Outcome};
 use anyhow::{Context, Result, anyhow, bail};
@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Re-run an earlier fleet from its immutable manifest and authoritative
-/// journal. Grove remains the source of truth for task lifecycle and receipts.
+/// journal. The active host remains the source of truth for task lifecycle.
 pub fn resume(
     current: &Config,
     run_id: &str,
@@ -19,12 +19,23 @@ pub fn resume(
     let replay = crate::run_manifest::replay(&run_dir, run_id, current)?;
     let config = replay.config;
     crate::config::selected_profile(replay.selected_profile.as_deref());
-    let grove = GroveCli::new(config.grove_bin());
+    let repo = std::env::current_dir().context("resolving current directory")?;
+    let recorded_host = crate::run_manifest::recorded_host_kind(&run_dir)?;
+    let host = host::open(&config, &repo)?;
+    let live = host.preflight()?;
+    if let Some(recorded) = recorded_host.as_deref()
+        && recorded != live.kind
+    {
+        bail!(
+            "run {run_id} was recorded under host {recorded:?} but config resolves to {:?}; set [host] kind = {recorded:?} to resume",
+            live.kind
+        );
+    }
     crate::doctor::require(&config, &replay.orders, allow_unknown_auth)?;
 
     let records = crate::run_journal::records(&run_dir.join("events.jsonl"), run_id)?;
     let mut history = histories(records)?;
-    let tasks = task_evidence(grove.task_status(&std::env::current_dir()?)?)?;
+    let tasks = task_evidence(host.task_status(&repo)?)?;
     let known: BTreeSet<&str> = replay
         .orders
         .iter()
@@ -66,7 +77,7 @@ pub fn resume(
                 )
             })?;
             agree(order, &config, &report, task)?;
-            cleanup(&grove, task, state.worktree.as_deref(), &mut report)?;
+            cleanup(host.as_ref(), task, state.worktree.as_deref(), &mut report)?;
             report.detail = Some(match report.detail.take() {
                 Some(detail) => format!("{detail}; carried from run {run_id}"),
                 None => format!("carried from run {run_id}"),
@@ -77,15 +88,14 @@ pub fn resume(
 
         if let Some(task) = task {
             if let Some(report) = state.report.as_mut() {
-                cleanup(&grove, task, state.worktree.as_deref(), report)?;
+                cleanup(host.as_ref(), task, state.worktree.as_deref(), report)?;
             } else if state
                 .worktree
                 .as_ref()
                 .is_some_and(|path| Path::new(path).exists())
             {
                 let path = Path::new(state.worktree.as_deref().expect("checked above"));
-                grove
-                    .worktree_release(&std::env::current_dir()?, path)
+                host.worktree_release(&repo, path)
                     .with_context(|| format!("releasing terminal worktree {}", path.display()))?;
             }
         } else if state
@@ -94,7 +104,7 @@ pub fn resume(
             .is_some_and(|path| Path::new(path).exists())
         {
             bail!(
-                "order {:?} has worktree {} but Grove task {:?} is missing; recover that worktree before resuming",
+                "order {:?} has worktree {} but host task {:?} is missing; recover that worktree before resuming",
                 order.id,
                 state.worktree.as_deref().unwrap_or_default(),
                 state.task_id
@@ -106,7 +116,7 @@ pub fn resume(
         }
         prior.push(state.into_report(order, &config));
     }
-    crate::run::execute(&config, grove, orders, stream, carried, prior)
+    crate::run::execute(&config, host, orders, stream, carried, prior)
 }
 
 #[derive(Default)]
@@ -306,7 +316,7 @@ fn agree(order: &Order, config: &Config, report: &OrderReport, task: &TaskEviden
 }
 
 fn cleanup(
-    grove: &GroveCli,
+    host: &dyn host::Host,
     task: &TaskEvidence,
     worktree: Option<&str>,
     report: &mut OrderReport,
@@ -314,11 +324,11 @@ fn cleanup(
     let Some(path) = worktree.map(PathBuf::from).filter(|path| path.exists()) else {
         return Ok(());
     };
-    let outcome = grove
+    let outcome = host
         .worktree_release(&std::env::current_dir()?, &path)
         .with_context(|| {
             format!(
-                "releasing terminal Grove task {} at {}",
+                "releasing terminal host task {} at {}",
                 task.id,
                 path.display()
             )

@@ -2,13 +2,14 @@
 
 use crate::config::Config;
 use crate::events::EventSink;
-use crate::grove::GroveCli;
+use crate::host::{self, Host};
 use crate::order::Order;
 use crate::report::{OrderReport, RunReport};
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -20,7 +21,9 @@ pub(crate) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) struct Ctx<'a> {
     pub(crate) config: &'a Config,
-    pub(crate) grove: GroveCli,
+    pub(crate) host: Arc<dyn Host>,
+    /// Run id for host worktree identity.
+    pub(crate) run_id: String,
     pub(crate) repo: PathBuf,
     pub(crate) run_dir: PathBuf,
     pub(crate) events: EventSink,
@@ -36,10 +39,15 @@ pub fn run(
     allow_unknown_auth: bool,
 ) -> Result<i32> {
     crate::config::selected_profile(selected);
-    let grove = GroveCli::new(config.grove_bin());
+    let repo = std::env::current_dir()
+        .context("resolving current directory")?
+        .canonicalize()
+        .context("canonicalizing repository path")?;
+    let host = host::open(config, &repo)?;
+    let _info = host.preflight()?;
     let orders = crate::run_prepare::validated(paths, config)?;
     crate::doctor::require(config, &orders, allow_unknown_auth)?;
-    execute(config, grove, orders, stream, Vec::new(), Vec::new())
+    execute(config, host, orders, stream, Vec::new(), Vec::new())
 }
 pub fn resume(
     config: &Config,
@@ -52,13 +60,13 @@ pub fn resume(
 }
 pub(crate) fn execute(
     config: &Config,
-    grove: GroveCli,
+    host: Arc<dyn Host>,
     orders: Vec<Order>,
     stream: bool,
     carried: Vec<OrderReport>,
     prior: Vec<OrderReport>,
 ) -> Result<i32> {
-    let grove_version = grove.version()?;
+    let host_info = host.preflight()?;
     let selected_profile = crate::config::profile();
     let repo = std::env::current_dir()
         .context("resolving current directory")?
@@ -83,7 +91,7 @@ pub(crate) fn execute(
         &run_id,
         &repo,
         selected_profile.as_deref(),
-        &grove_version,
+        &host_info,
         config,
         &orders,
     )?;
@@ -110,7 +118,8 @@ pub(crate) fn execute(
     )?;
     let ctx = Ctx {
         config: &config,
-        grove,
+        host,
+        run_id: run_id.clone(),
         repo: repo.clone(),
         run_dir: run_dir.clone(),
         events,
@@ -295,7 +304,8 @@ mod tests {
     fn context<'a>(config: &'a Config, dir: &Path, prior: &'a [OrderReport]) -> Ctx<'a> {
         Ctx {
             config,
-            grove: GroveCli::new("grove".into()),
+            host: crate::host::grove_only("grove".into()),
+            run_id: "test-run".into(),
             repo: dir.into(),
             run_dir: dir.into(),
             events: EventSink::new(dir, "run".into(), false).unwrap(),

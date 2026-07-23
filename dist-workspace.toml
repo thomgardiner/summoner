@@ -19,6 +19,13 @@ targets = [
 ]
 installers = ["shell", "powershell"]
 install-updater = true
+install-success-msg = """
+summoner installed. Next:
+
+  summoner setup --preset codex   # or claude / kimi — harness skills + recipe
+  # Claude: /summoner · Codex/Grok: skill name summoner
+  summoner doctor
+"""
 checksum = "sha256"
 github-attestations = true
 

@@ -20,18 +20,11 @@ pub(crate) fn write_manifest(
     run_id: &str,
     repo: &Path,
     selected_profile: Option<&str>,
-    grove_version: &str,
+    host: &crate::host::HostInfo,
     config: &Config,
     orders: &[Order],
 ) -> Result<Config> {
-    let manifest = manifest(
-        run_id,
-        repo,
-        selected_profile,
-        grove_version,
-        config,
-        orders,
-    )?;
+    let manifest = manifest(run_id, repo, selected_profile, host, config, orders)?;
     let text = serde_json::to_vec_pretty(&manifest).context("serializing manifest.json")?;
     reject_values(&text, &manifest.backends)?;
     let bound = crate::run_manifest::bound_config(&manifest, config)?;
@@ -43,7 +36,7 @@ fn manifest(
     run_id: &str,
     repo: &Path,
     selected_profile: Option<&str>,
-    grove_version: &str,
+    host: &crate::host::HostInfo,
     config: &Config,
     orders: &[Order],
 ) -> Result<Manifest> {
@@ -87,7 +80,12 @@ fn manifest(
         start_head: git_head(repo)?,
         selected_profile: selected_profile.map(String::from),
         summoner_version: env!("CARGO_PKG_VERSION").to_string(),
-        grove_version: grove_version.to_string(),
+        grove_version: format!("{} {}", host.kind, host.version),
+        host: Some(crate::run_manifest::HostRecord {
+            kind: host.kind.clone(),
+            version: host.version.clone(),
+            state_root: host.state_root.as_ref().map(|p| p.display().to_string()),
+        }),
         settings: Settings {
             max_parallel: config.max_parallel(),
             default_verify_profile: config.default_verify_profile.clone(),
@@ -268,7 +266,13 @@ mod tests {
             source,
         };
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let error = write_manifest(dir.path(), "run", repo, None, "grove", &config, &[order])
+        let host = crate::host::HostInfo {
+            kind: "git".into(),
+            version: "test".into(),
+            state_root: None,
+            capabilities: crate::host::HostCapabilities::default(),
+        };
+        let error = write_manifest(dir.path(), "run", repo, None, &host, &config, &[order])
             .err()
             .expect("secret must reject the manifest")
             .to_string();
@@ -288,6 +292,11 @@ mod tests {
             selected_profile: Some("codex".into()),
             summoner_version: "0.1.0".into(),
             grove_version: "grove 0.3.2".into(),
+            host: Some(crate::run_manifest::HostRecord {
+                kind: "grove".into(),
+                version: "0.3.2".into(),
+                state_root: None,
+            }),
             settings: Settings {
                 max_parallel: 2,
                 default_verify_profile: None,

@@ -126,7 +126,7 @@ fn example_is_safe_parseable_and_idempotent() {
     std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
     std::fs::write(dir.path().join("Cargo.lock"), "version = 4\n").unwrap();
     let grove = crate::grove::GroveCli::new("unused-grove".into());
-    let first = example(dir.path(), false, &grove).unwrap();
+    let first = example(dir.path(), false, Some(&grove), "grove", false).unwrap();
     assert!(first.written.contains(&"orders/example.toml".to_string()));
     let path = dir.path().join("orders/example.toml");
     let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -139,9 +139,22 @@ fn example_is_safe_parseable_and_idempotent() {
     assert_eq!(value["verify_profile"].as_str(), Some("rust-check"));
     assert!(dir.path().join(".grove.toml").is_file());
     let before = std::fs::read(&path).unwrap();
-    let second = example(dir.path(), false, &grove).unwrap();
+    let second = example(dir.path(), false, Some(&grove), "grove", false).unwrap();
     assert!(second.skipped.contains(&"orders/example.toml".to_string()));
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn example_git_host_works_without_cargo_or_grove() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = example(dir.path(), false, None, "git", true).unwrap();
+    assert!(report.written.contains(&"orders/example.toml".to_string()));
+    assert!(!dir.path().join(".grove.toml").is_file());
+    let value: toml::Value =
+        toml::from_str(&std::fs::read_to_string(dir.path().join("orders/example.toml")).unwrap())
+            .unwrap();
+    assert_eq!(value["id"].as_str(), Some("summoner-demo"));
+    assert!(value.get("verify_profile").is_none());
 }
 
 #[test]
@@ -155,7 +168,9 @@ fn example_selects_a_real_required_grove_profile() {
     example(
         dir.path(),
         false,
-        &crate::grove::GroveCli::new("unused-grove".into()),
+        Some(&crate::grove::GroveCli::new("unused-grove".into())),
+        "grove",
+        false,
     )
     .unwrap();
     let value: toml::Value =
@@ -175,7 +190,9 @@ fn example_refuses_ambiguous_user_owned_verification() {
     let error = example(
         dir.path(),
         false,
-        &crate::grove::GroveCli::new("unused-grove".into()),
+        Some(&crate::grove::GroveCli::new("unused-grove".into())),
+        "grove",
+        false,
     )
     .unwrap_err();
     assert!(error.to_string().contains("no single required usable"));
@@ -193,7 +210,9 @@ fn example_refuses_a_single_nonrequired_profile() {
     let error = example(
         dir.path(),
         false,
-        &crate::grove::GroveCli::new("unused-grove".into()),
+        Some(&crate::grove::GroveCli::new("unused-grove".into())),
+        "grove",
+        false,
     )
     .unwrap_err();
     assert!(error.to_string().contains("no single required usable"));

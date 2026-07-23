@@ -34,6 +34,11 @@ pub struct Config {
     pub default_verify_profile: Option<String>,
     pub order_timeout_secs: Option<u64>,
     pub grove_bin: Option<String>,
+    /// Isolation/verification host. Default resolution: explicit kind, else
+    /// legacy grove_bin, else `.grove.toml`+grove on PATH → grove, else git.
+    pub host: Option<HostSettings>,
+    /// Verification profiles for the git host (`[verification]` table).
+    pub verification: Option<crate::host::VerificationConfig>,
     pub keep_failed_worktrees: Option<bool>,
     pub fail_fast: Option<usize>,
     pub revise: Option<usize>,
@@ -58,6 +63,17 @@ pub struct Config {
     pub notify: Notify,
     #[serde(skip)]
     pub(crate) frozen: bool,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default, deny_unknown_fields)]
+pub struct HostSettings {
+    /// `git` (default independence path) or `grove`.
+    pub kind: Option<String>,
+    /// Grove binary when kind = grove (defaults to `grove` / grove_bin).
+    pub bin: Option<String>,
+    /// Directory for git-host worktrees.
+    pub worktree_root: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -306,6 +322,12 @@ fn merge(base: &mut Config, over: Config) {
         .or(base.default_verify_profile.take());
     base.order_timeout_secs = over.order_timeout_secs.or(base.order_timeout_secs);
     base.grove_bin = over.grove_bin.or(base.grove_bin.take());
+    if over.host.is_some() {
+        base.host = over.host;
+    }
+    if over.verification.is_some() {
+        base.verification = over.verification;
+    }
     base.keep_failed_worktrees = over.keep_failed_worktrees.or(base.keep_failed_worktrees);
     base.fail_fast = over.fail_fast.or(base.fail_fast);
     base.revise = over.revise.or(base.revise);
