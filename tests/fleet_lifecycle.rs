@@ -123,12 +123,12 @@ fn require_grove(grove: &str) {
     let version = Command::new(grove)
         .arg("--version")
         .output()
-        .expect("Grove 0.3.5 must be installed or SUMMONER_TEST_GROVE must name it");
+        .expect("Grove 0.4.0 must be installed or SUMMONER_TEST_GROVE must name it");
     assert_success(&version);
     assert_eq!(
         String::from_utf8_lossy(&version.stdout).trim(),
-        "grove 0.3.5",
-        "fleet qualification requires exact Grove 0.3.5"
+        "grove 0.4.0",
+        "fleet qualification requires exact Grove 0.4.0"
     );
     let status = Command::new(grove)
         .args(["task", "status", "--json"])
@@ -136,7 +136,7 @@ fn require_grove(grove: &str) {
         .expect("run Grove compatibility probe");
     assert_success(&status);
     let value: Value = serde_json::from_slice(&status.stdout).expect("parse Grove task status");
-    assert_eq!(value["schema_version"], 3, "wrong Grove task schema");
+    assert_eq!(value["schema_version"], 4, "wrong Grove task schema");
 }
 
 fn git(repo: &Path, args: &[&str]) {

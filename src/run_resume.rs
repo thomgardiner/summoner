@@ -225,9 +225,9 @@ struct TaskEvidence {
 
 fn task_evidence(value: serde_json::Value) -> Result<BTreeMap<String, TaskEvidence>> {
     let board: TaskBoard = serde_json::from_value(value).context("parsing Grove task status")?;
-    if board.schema_version != 3 {
+    if board.schema_version != 4 {
         bail!(
-            "Grove task status schema {} cannot reconcile durable approval; need schema 3",
+            "Grove task status schema {} cannot reconcile durable approval; need schema 4",
             board.schema_version
         );
     }

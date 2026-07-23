@@ -2,10 +2,17 @@
 
 ## 0.2.0 — unreleased
 
-Requires Grove 0.3.5 (task record schema 6, the `edit` exec capability, and
-pinned verification policy).
+Requires Grove 0.4.0 (task record schema 6, task-status schema 4, the `edit`
+exec capability, and pinned verification policy).
 
 ### Changed
+
+- Pin the release-qualified compatibility contract to Grove 0.4.0. Grove 0.4.0
+  reports task-status schema 4 (it adds live `outside_scope` drift), so the
+  0.3.5 contract's preflight and CI capability checks rejected it. Grove's
+  breaking `--agent` change (no shared default identity) needs no code change
+  here: Summoner already passes an explicit `--agent` on every `task begin` and
+  `worktree acquire`.
 
 - `after` now supplies the base as well as the ordering: a dependent branches
   from its dependencies' verified candidate commits, merged when there are

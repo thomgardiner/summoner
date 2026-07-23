@@ -2,7 +2,7 @@
 
 ## Preflight
 
-`doctor`, `run`, and `resume` all check: Grove 0.3.5 capability contract, git
+`doctor`, `run`, and `resume` all check: Grove 0.4.0 capability contract, git
 identity, verification profiles, executor binaries, model CLI health. Malformed
 config is an error, never a fallback.
 

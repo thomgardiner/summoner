@@ -21,7 +21,7 @@ fn require_grove() {
     let output = Command::new(grove_bin())
         .arg("--version")
         .output()
-        .expect("Grove 0.3.5 must be installed or SUMMONER_TEST_GROVE must name it");
+        .expect("Grove 0.4.0 must be installed or SUMMONER_TEST_GROVE must name it");
     assert!(
         output.status.success(),
         "Grove --version failed: {}",
@@ -29,7 +29,7 @@ fn require_grove() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
-        "grove 0.3.5",
+        "grove 0.4.0",
         "fleet tests require the exact qualified Grove release"
     );
     let output = Command::new(grove_bin())
@@ -39,7 +39,7 @@ fn require_grove() {
     assert!(output.status.success(), "Grove task status probe failed");
     let status: Value =
         serde_json::from_slice(&output.stdout).expect("Grove task status must be valid JSON");
-    assert_eq!(status["schema_version"], 3, "wrong Grove task schema");
+    assert_eq!(status["schema_version"], 4, "wrong Grove task schema");
 }
 
 macro_rules! require_grove {

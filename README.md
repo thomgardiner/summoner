@@ -10,12 +10,12 @@ pile of transcripts.
 Summoner requires [Grove](https://github.com/thomgardiner/grove). Install both:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/grove/releases/download/v0.3.5/grove-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/grove/releases/download/v0.4.0/grove-installer.sh | sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.sh | sh
 ```
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/grove/releases/download/v0.3.5/grove-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/grove/releases/download/v0.4.0/grove-installer.ps1 | iex"
 powershell -ExecutionPolicy ByPass -c "irm https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.ps1 | iex"
 ```
 

@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const VERSION: &str = "0.3.5";
+const VERSION: &str = "0.4.0";
 
 #[derive(Deserialize)]
 struct Report {
@@ -58,7 +58,7 @@ pub(super) fn check(cli: &GroveCli) -> Result<Capabilities> {
     let exact = report.schema_version == 1
         && report.grove_version == VERSION
         && report.status.repository_schema == 1
-        && report.status.task_status_schema == 3
+        && report.status.task_status_schema == 4
         && report.status.task_record_schema == 6
         // Executors run under `task exec --capability edit`; a Grove without it
         // would either reject the flag or silently hold a lane per session.
@@ -82,7 +82,7 @@ pub(super) fn check(cli: &GroveCli) -> Result<Capabilities> {
     Ok(Capabilities {
         version: report.grove_version,
         repository_schema: 1,
-        task_status_schema: 3,
+        task_status_schema: 4,
         task_record_schema: 6,
         exec_capabilities: report.task.exec_capabilities,
         verification_policy_pinned: true,
