@@ -1404,6 +1404,34 @@ fn usage_marker_records_tokens_per_order_and_per_run() {
     assert_eq!(report["usage_tokens"], 1234, "{report}");
 }
 
+/// The prompt-cache split is read from Claude's `--output-format json` result
+/// envelope, so a run can show whether the fleet is reading context warm from
+/// cache or paying to write it cold. The fake executor emits the real envelope
+/// shape, including the per-turn `usage.iterations` copy whose smaller numbers
+/// must NOT be what lands in the report — only the cumulative top-level count.
+#[test]
+fn cache_split_is_read_from_the_claude_json_envelope() {
+    require_grove!();
+    let fixture = Fixture::new(true);
+    // Captured from a real `claude --print --output-format json` run: cumulative
+    // read 66448 / write 8494, shadowed by a nested per-turn 24807 / 614. The
+    // whole envelope is one echoed line so stdout is exactly the JSON.
+    fixture.executor(
+        "echo 'pub fn wave() {}' >> src/lib.rs\ngit add -A\ngit commit -qm work\n\
+         echo '[{\"type\":\"assistant\",\"message\":{\"usage\":{\"cache_read_input_tokens\":40870,\"cache_creation_input_tokens\":7880}}},\
+         {\"type\":\"result\",\"subtype\":\"success\",\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":8494,\"cache_read_input_tokens\":66448,\"output_tokens\":4,\"iterations\":[{\"input_tokens\":2,\"output_tokens\":4,\"cache_read_input_tokens\":24807,\"cache_creation_input_tokens\":614}]}}]'",
+        60,
+    );
+    let order = fixture.order("wave.toml", ORDER_TOML);
+
+    let report = fixture.run_report(&[&order], 0);
+    assert_eq!(report["orders"][0]["cache_read_tokens"], 66448, "{report}");
+    assert_eq!(report["orders"][0]["cache_write_tokens"], 8494, "{report}");
+    // The run-level rollup sums the split across orders.
+    assert_eq!(report["cache_read_tokens"], 66448, "{report}");
+    assert_eq!(report["cache_write_tokens"], 8494, "{report}");
+}
+
 /// A configured usage_marker that never matches the executor's output must
 /// surface as a tripwire on the report — including the successful verified
 /// path, where a prior version had the diff scan overwrite the warning. A

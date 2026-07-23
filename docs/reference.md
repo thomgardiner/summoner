@@ -150,6 +150,24 @@ command that fails is ignored, and each is time-bounded so a hung one (a `curl`
 with no timeout) cannot wedge the run. Summoner waits for the final
 `run_finished` notification before exiting.
 
+## Cache accounting
+
+`usage_marker` scrapes the executor's total token count after each attempt
+(codex prints `tokens used\nN`). The prompt-cache split is recorded per order
+(`cache_read_tokens` / `cache_write_tokens`) and summed into the run report:
+`cache_read` is context served warm from cache (~0.1x price), `cache_write` is
+context written cold (1.25x–2x). A run whose write dwarfs its read is thrashing
+the prompt cache.
+
+The split is read from Claude Code's `--output-format json` result envelope,
+whose cumulative `usage` carries `cache_read_input_tokens` and
+`cache_creation_input_tokens` — not a substring marker, because Claude repeats
+those keys inside `usage.iterations` (one entry per turn), so a text scan would
+report a single turn instead of the run total. The bundled `claude` preset
+already requests JSON output; codex reports no cache split, so it is simply not
+measured there. Both fields are absent from the report until an executor
+reports them.
+
 ## Landing
 
 `summoner land [run-id]` integrates a finished run's verified candidate commits

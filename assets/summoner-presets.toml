@@ -35,8 +35,10 @@ auth_checked = true
 setup_hint = "run `claude auth login`, then rerun `summoner doctor`"
 
 [presets.backend]
+# `--output-format json` prints the final result envelope, whose cumulative
+# `usage` carries the prompt-cache split Summoner records (see `claude_cache_split`).
 argv = [
-  "claude", "--print", "--permission-mode", "auto",
+  "claude", "--print", "--output-format", "json", "--permission-mode", "auto",
   "--add-dir", "{git_common_dir}",
 ]
 prompt = "stdin"

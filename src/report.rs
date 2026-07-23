@@ -87,6 +87,14 @@ pub struct RunReport {
     /// Sum of per-order token usage, present when any executor reported one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_tokens: Option<u64>,
+    /// Sum of the per-order prompt-cache read / write tokens, present when a
+    /// backend reported them. The run-level read:write ratio is the fleet's
+    /// prompt-cache health at a glance (mostly reads = warm, mostly writes =
+    /// thrash).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
     /// Content address of the trusted policy that gated this run, when one was
     /// declared: the report states which bar its outcomes were judged against.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,10 +117,15 @@ impl RunReport {
         for order in &orders {
             *summary.entry(order.outcome.key()).or_insert(0) += 1;
         }
-        let usage_tokens = orders
-            .iter()
-            .filter_map(|order| order.usage_tokens)
-            .reduce(|a, b| a.saturating_add(b));
+        let sum = |select: fn(&OrderReport) -> Option<u64>| {
+            orders
+                .iter()
+                .filter_map(select)
+                .reduce(|a, b| a.saturating_add(b))
+        };
+        let usage_tokens = sum(|order| order.usage_tokens);
+        let cache_read_tokens = sum(|order| order.cache_read_tokens);
+        let cache_write_tokens = sum(|order| order.cache_write_tokens);
         RunReport {
             schema_version: SCHEMA_VERSION,
             run_id,
@@ -121,6 +134,8 @@ impl RunReport {
             duration_secs,
             summary,
             usage_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
             trusted_policy_sha256,
             orders,
         }
@@ -194,6 +209,14 @@ pub struct OrderReport {
     pub conflicts: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_tokens: Option<u64>,
+    /// Prompt-cache tokens the executor reported: `cache_read` is context served
+    /// warm from cache (cheap, ~0.1x), `cache_write` is context written cold to
+    /// the cache (1.25x/2x). A fleet whose write dwarfs read is thrashing the
+    /// cache; both are `None` until a backend declares the markers to scrape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executor_exit: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,6 +261,8 @@ impl OrderReport {
             finish: None,
             conflicts: None,
             usage_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
             executor_exit: None,
             stdout_log: None,
             stderr_log: None,

@@ -262,6 +262,23 @@ pub fn tail(path: &Path, limit: usize) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// The whole log, but only if it is at most `limit` bytes; `None` if it is
+/// missing or larger. A `tail` cannot serve a structured parser: the value it
+/// wants (Claude's cumulative usage) lives inside the terminal array element,
+/// so a truncated head is unparseable JSON. The cap bounds the read for a
+/// pathologically large transcript (Claude's JSON stays in the low KBs because
+/// tool output is not inlined).
+pub fn read_capped(path: &Path, limit: usize) -> Option<String> {
+    use std::io::Read;
+    let mut file = File::open(path).ok()?;
+    if file.metadata().ok()?.len() > limit as u64 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -149,6 +149,43 @@ fn diff_stats(worktree: &Path, base: &str) -> DiffStats {
     stats
 }
 
+/// The cumulative prompt-cache split (read, write) from Claude Code's
+/// `--output-format json` output, or `None` for any executor whose output is
+/// not that envelope (codex prints plain text; nothing to read).
+///
+/// This cannot be a substring marker like [`number_after`]. Claude repeats the
+/// same keys inside `usage.iterations` (one entry per turn) *after* the
+/// cumulative top-level copy, so a last-match text scan reports a single turn
+/// instead of the run total — measured 24,807 for a turn against a true 66,448.
+/// Reading `cache_read_input_tokens` / `cache_creation_input_tokens` as direct
+/// children of the terminal `result` message's `usage` is the only correct
+/// read. The streaming deserializer tolerates one value (`--output-format
+/// json`) or many (`stream-json`); the last `result` seen wins.
+pub(crate) fn claude_cache_split(output: &str) -> Option<(u64, u64)> {
+    use serde_json::Value;
+    fn split_of(message: &Value) -> Option<(u64, u64)> {
+        if message.get("type")? != "result" {
+            return None;
+        }
+        let usage = message.get("usage")?;
+        let read = usage.get("cache_read_input_tokens")?.as_u64()?;
+        let write = usage.get("cache_creation_input_tokens")?.as_u64()?;
+        Some((read, write))
+    }
+    let mut split = None;
+    let stream = serde_json::Deserializer::from_str(output).into_iter::<Value>();
+    for value in stream.flatten() {
+        let messages = match &value {
+            Value::Array(items) => items.iter().filter_map(split_of).next_back(),
+            message => split_of(message),
+        };
+        if let Some(found) = messages {
+            split = Some(found);
+        }
+    }
+    split
+}
+
 /// The first number after the LAST occurrence of `marker`, tolerating comma
 /// and underscore separators (codex prints "tokens used\n40,958").
 pub(crate) fn number_after(text: &str, marker: &str) -> Option<u64> {
@@ -328,6 +365,37 @@ mod tests {
         assert_eq!(number_after("no marker here", "tokens used"), None);
         assert_eq!(
             number_after("tokens used but no number", "tokens used"),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_cache_split_reads_the_cumulative_not_the_nested_turn() {
+        // A faithful slice of `claude --print --output-format json`: an earlier
+        // assistant message carries its own usage, and the terminal result's
+        // cumulative (66448/8494) is followed in the byte stream by a smaller
+        // per-turn copy nested in `iterations` (24807/614). A text scan would
+        // report the last, wrong numbers; the parse must report the cumulative.
+        let output = r#"[
+          {"type":"assistant","message":{"usage":{"cache_read_input_tokens":40870,"cache_creation_input_tokens":7880}}},
+          {"type":"result","subtype":"success","usage":{"input_tokens":2,"cache_creation_input_tokens":8494,"cache_read_input_tokens":66448,"output_tokens":4,"iterations":[{"input_tokens":2,"output_tokens":4,"cache_read_input_tokens":24807,"cache_creation_input_tokens":614}]}}
+        ]"#;
+        assert_eq!(claude_cache_split(output), Some((66_448, 8_494)));
+
+        // stream-json: the same values across concatenated line objects; the
+        // last `result` wins over an earlier one.
+        let stream = concat!(
+            r#"{"type":"assistant","message":{"usage":{"cache_read_input_tokens":1}}}"#,
+            "\n",
+            r#"{"type":"result","usage":{"cache_read_input_tokens":300,"cache_creation_input_tokens":40}}"#,
+        );
+        assert_eq!(claude_cache_split(stream), Some((300, 40)));
+
+        // Codex prints plain text; there is nothing to parse, so no false split.
+        assert_eq!(claude_cache_split("ok\ntokens used\n8,673\n"), None);
+        // A result without the cache fields is simply not measured.
+        assert_eq!(
+            claude_cache_split(r#"{"type":"result","usage":{"input_tokens":5}}"#),
             None
         );
     }

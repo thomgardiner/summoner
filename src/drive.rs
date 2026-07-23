@@ -9,7 +9,8 @@ use crate::gate::{ReviewDecision, finish_task, profile_verify, review_gate};
 use crate::grove::BeginOutcome;
 use crate::order::Order;
 use crate::outcome::{
-    finalize, git, head_and_tail, kill_recorded_group, number_after, release, token_after,
+    claude_cache_split, finalize, git, head_and_tail, kill_recorded_group, number_after, release,
+    token_after,
 };
 use crate::report::{OrderReport, Outcome, WorkerFailure};
 use crate::run::{Ctx, SHUTDOWN};
@@ -425,6 +426,21 @@ impl<'a> OrderRun<'a> {
                     "usage_marker {marker:?} never matched this attempt's output;                      token usage was not tracked"
                 )),
             }
+        }
+        // Prompt-cache split, best-effort observability: a missing match is
+        // silent (unlike usage, its absence just means "not measured", never a
+        // budget hole). Only Claude's JSON envelope carries the split; parse it
+        // rather than substring-scan, since the cumulative is shadowed by a
+        // per-turn copy nested in `usage.iterations` (see `claude_cache_split`).
+        if let Some((read, write)) = logs.iter().find_map(|name| {
+            executor::read_capped(&self.order_dir.join(name), 8 * 1024 * 1024)
+                .as_deref()
+                .and_then(claude_cache_split)
+        }) {
+            report.cache_read_tokens =
+                Some(report.cache_read_tokens.unwrap_or(0).saturating_add(read));
+            report.cache_write_tokens =
+                Some(report.cache_write_tokens.unwrap_or(0).saturating_add(write));
         }
         if let Some(marker) = &self.backend.session_marker
             && let Some(session) = logs.iter().find_map(|name| {
