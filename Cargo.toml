@@ -5,6 +5,10 @@ edition = "2024"
 description = "Fleet runner for LLM coding agents: host-pluggable worktrees (git or Grove), vendor-neutral executors, independent review, durable reports."
 license = "MIT"
 repository = "https://github.com/thomgardiner/summoner"
+homepage = "https://github.com/thomgardiner/summoner"
+readme = "README.md"
+keywords = ["agents", "fleet", "grove", "orchestration", "cli"]
+categories = ["development-tools", "command-line-utilities"]
 publish = false
 
 [[bin]]

@@ -1,5 +1,8 @@
 # Changelog
 
+All notable changes to Summoner are documented here. Summoner follows semantic
+versioning.
+
 ## 0.2.0 — unreleased
 
 Requires Grove 0.4.0 (task record schema 6, task-status schema 4, the `edit`

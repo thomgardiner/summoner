@@ -1,4 +1,4 @@
-# Summoner
+# summoner
 
 A host-pluggable fleet runner for coding-agent CLIs. You write work orders;
 Summoner dispatches any configured model CLI into isolated worktrees, verifies
@@ -21,23 +21,38 @@ Resolution: explicit `[host] kind` → legacy `grove_bin` → `.grove.toml` plus
 
 ## Install
 
+macOS or Linux:
+
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.sh | sh
 summoner setup --preset codex    # harness skills (/summoner) + executor recipe
 ```
 
-Optional Grove (Rust monorepos, warm lanes) — install both if you want fleets **and** CoW lanes:
+Windows PowerShell:
+
+```powershell
+$ErrorActionPreference = "Stop"
+irm https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.ps1 | iex
+summoner setup --preset codex
+```
+
+Optional Grove (Rust monorepos, warm lanes) — install both if you want fleets
+**and** CoW lanes:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
 grove setup
 ```
 
 Use either product alone: Summoner with `[host] kind = "git"` needs no Grove;
 Grove never launches models and never depends on Summoner.
 
-Or from a checkout: `cargo install --locked --path .`. You need git and at least
-one authenticated model CLI
+The installers verify release checksums and also install `summoner-update` (and
+`grove-update` when you install Grove). Source install:
+`cargo install --git https://github.com/thomgardiner/summoner --locked`.
+You need git and at least one authenticated model CLI
 ([Codex](https://github.com/openai/codex#installing-and-running-codex-cli),
 [Claude Code](https://code.claude.com/docs/en/installation),
 [Kimi](https://www.kimi.com/code/docs/en/)).
@@ -63,7 +78,7 @@ Reload Claude Code (new session) after setup so `/summoner` appears. `summoner
 doctor` notes whether skills are installed. Re-run with `--refresh` after
 upgrades.
 
-## Five minutes
+## Use
 
 ```sh
 summoner setup --preset codex --repo   # skills + executors + AGENTS.md
@@ -126,7 +141,7 @@ way dispatch will and reports conflicts, couplings, and execution waves.
 | `after` | no | Order ids that must finish first. Supplies the base too: the dependent branches from its dependencies' verified commits (several are merged; conflicts skip the order). An explicit `base` overrides, but must contain every dependency's candidate. |
 | `variants` | no | N-version dispatch: one sibling per executor, orchestrator picks the winner. |
 
-## Executors
+## Config
 
 Argv templates, no vendor code. Presets install only via
 `summoner init --global --preset <name>`; custom executors live in your
@@ -160,9 +175,11 @@ ranked worst-first.
 Exit codes: 0 all verified, 1 domain outcome needs review, 2 usage or
 infrastructure error.
 
-## More
-
 Revision loops, budgets, resume, the review-gate protocol, and profile
-inheritance: [docs/reference.md](docs/reference.md). Boundary: Grove owns
+inheritance: [docs/reference.md](docs/reference.md). Boundary: the host owns
 worktrees, claims, lanes, and receipts; Summoner owns dispatch, review, and
 reports.
+
+## License
+
+MIT
