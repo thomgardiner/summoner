@@ -15,6 +15,7 @@ mod lifecycle;
 mod notify;
 mod order;
 mod outcome;
+mod overview;
 mod plan;
 mod presets;
 mod report;
@@ -111,6 +112,12 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// One pane across every fleet and every Grove repo on this machine.
+    Overview {
+        /// Redraw continuously instead of printing once.
+        #[arg(long)]
+        watch: bool,
+    },
     /// Aggregate historical outcomes.
     Scorecard {
         #[arg(long)]
@@ -193,6 +200,7 @@ fn dispatch() -> Result<i32> {
         }
         Cmd::Watch { run_id } => watch::watch(run_id),
         Cmd::Land { run_id, dry_run } => land::land(run_id, dry_run),
+        Cmd::Overview { watch } => overview::overview(&resolved()?.config.grove_bin(), watch),
         Cmd::Scorecard { repo } => scorecard::scorecard(repo),
         Cmd::Status => status(&resolved()?.config),
         Cmd::Doctor { paths } => doctor::run(&resolved()?.config, &paths, cli.allow_unknown_auth),

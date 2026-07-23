@@ -7,6 +7,11 @@ exec capability, and pinned verification policy).
 
 ### Added
 
+- `summoner overview` prints one pane across every fleet and Grove repo on the
+  machine: each summoner run's repo and order tally (active first), and each
+  Grove repo's recent coordination activity by category, folded from the same
+  best-effort NDJSON journals `watch` reads. `--watch` redraws it live. No more
+  visiting a dozen repos to see what is running.
 - `summoner land [run-id]` integrates a finished run's verified candidate
   commits into the current branch in dependency order, fast-forwarding when git
   can. It only touches candidates that passed the run's bar and merges the exact

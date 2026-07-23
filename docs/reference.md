@@ -169,3 +169,17 @@ conflicted order and what remains. Resolve it by hand, then land again.
 `land` refuses a dirty working tree, and must run in the repository the run
 targeted. `--dry-run` prints the plan (landable order and what is set aside)
 without merging.
+
+## Overview
+
+`summoner overview` prints one pane across every fleet and Grove repo on the
+machine, so you don't visit a dozen repos to see what is running. `--watch`
+redraws it live. Two sections, both folded from best-effort NDJSON:
+
+- **Fleets** — every summoner run journal (`runs/*/events.jsonl`), one line
+  each: repo, running or finished, and an order tally (verified / running /
+  failed). Active fleets sort first, then most recent.
+- **Grove coordination** — Grove's per-repo event streams under its cache root
+  (`events/*.jsonl`, resolved via `grove config`), one line each: the repo slug,
+  last activity, and a tally of recent events by category (`task`, `verify`,
+  `claim`, ...). A torn line is skipped, never blanking the pane.
