@@ -149,3 +149,23 @@ Notifications are a side-channel over the run journal, never authoritative: a
 command that fails is ignored, and each is time-bounded so a hung one (a `curl`
 with no timeout) cannot wedge the run. Summoner waits for the final
 `run_finished` notification before exiting.
+
+## Landing
+
+`summoner land [run-id]` integrates a finished run's verified candidate commits
+into the current branch, in dependency order. It defaults to the latest finished
+run. This is the gated apply, not an auto-merge: you still author the review;
+`land` only touches candidates that already passed the run's bar (`verified`, or
+`approved` when a reviewer ran) and merges the exact `candidate_commit` the
+report recorded, not whatever the branch points at now.
+
+An order is set aside — with a reason in the report — when it is non-green, has
+no candidate commit, or depends on an order that was itself set aside. Landable
+orders merge in topological order, fast-forwarding when git can. The first
+conflict stops the run: that merge is aborted, the earlier merges stay
+committed, the working tree is left clean, and `land` exits 1 naming the
+conflicted order and what remains. Resolve it by hand, then land again.
+
+`land` refuses a dirty working tree, and must run in the repository the run
+targeted. `--dry-run` prints the plan (landable order and what is set aside)
+without merging.

@@ -10,6 +10,7 @@ mod gate;
 mod grove;
 mod init;
 mod integration;
+mod land;
 mod lifecycle;
 mod notify;
 mod order;
@@ -101,6 +102,15 @@ enum Cmd {
     },
     /// Watch the latest or named run.
     Watch { run_id: Option<String> },
+    /// Merge a finished run's verified candidates into the current branch, in
+    /// dependency order, stopping at the first conflict.
+    Land {
+        /// The run to land; defaults to the latest finished run.
+        run_id: Option<String>,
+        /// Print the landing plan without merging anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Aggregate historical outcomes.
     Scorecard {
         #[arg(long)]
@@ -182,6 +192,7 @@ fn dispatch() -> Result<i32> {
             )
         }
         Cmd::Watch { run_id } => watch::watch(run_id),
+        Cmd::Land { run_id, dry_run } => land::land(run_id, dry_run),
         Cmd::Scorecard { repo } => scorecard::scorecard(repo),
         Cmd::Status => status(&resolved()?.config),
         Cmd::Doctor { paths } => doctor::run(&resolved()?.config, &paths, cli.allow_unknown_auth),

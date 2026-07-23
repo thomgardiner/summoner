@@ -7,6 +7,13 @@ exec capability, and pinned verification policy).
 
 ### Added
 
+- `summoner land [run-id]` integrates a finished run's verified candidate
+  commits into the current branch in dependency order, fast-forwarding when git
+  can. It only touches candidates that passed the run's bar and merges the exact
+  reviewed commit; non-green orders and their dependents are set aside with a
+  reason. The first conflict stops the run with the earlier merges committed and
+  the tree left clean, exiting 1. `--dry-run` prints the plan. Gated apply, not
+  an auto-merge — the review is still yours to author.
 - `[notify] command = [...]` runs when a run finishes, an order lands non-green,
   or a review starts, so you can leave a fleet unattended. The command gets the
   event's JSON line on stdin and `SUMMONER_NOTIFY_TITLE`/`_BODY`/`_EVENT` in the
