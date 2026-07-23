@@ -1,7 +1,6 @@
-//! `summoner land` against a real repository: it merges a finished run's
-//! verified candidate commits into the current branch in dependency order, and
-//! stops at the first conflict with the earlier merges committed and the tree
-//! left clean.
+//! `summoner land` against a real repository: merges a finished run's verified
+//! candidate commits onto a temporary integration branch in dependency order,
+//! then fast-forwards the protected target only if the whole set merges cleanly.
 
 use serde_json::{Value, json};
 use std::path::Path;
@@ -159,10 +158,10 @@ fn land_stops_at_the_first_conflict_leaving_a_clean_tree() {
     assert_eq!(report["landed"][0]["id"], "p");
     assert_eq!(report["stopped"]["id"], "q");
 
-    // p is committed; the tree is clean (the aborted q merge left nothing behind).
-    assert_eq!(std::fs::read_to_string(repo.join("x.txt")).unwrap(), "p\n");
+    // Protected target is unchanged: partial integration must not land.
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head_before);
+    assert_eq!(std::fs::read_to_string(repo.join("x.txt")).unwrap(), "0\n");
     assert!(git(&repo, &["status", "--porcelain"]).is_empty());
-    assert_ne!(git(&repo, &["rev-parse", "HEAD"]), head_before);
 }
 
 #[test]

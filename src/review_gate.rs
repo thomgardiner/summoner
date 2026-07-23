@@ -34,6 +34,16 @@ pub(crate) fn run(
     if SHUTDOWN.load(Ordering::SeqCst) {
         return Ok(ReviewDecision::Interrupted);
     }
+    // Held review needs an immutable, isolated capsule. Refuse on hosts that
+    // only offer a live worktree so we never pretend Git == Grove.
+    let caps = ctx.host.capabilities();
+    if !caps.supports_held_review() {
+        bail!(
+            "host {:?} cannot run held review (missing {}); use [host] kind = \"grove\"",
+            ctx.host.kind(),
+            caps.missing_for_held_review().join(", ")
+        );
+    }
     let backend = &ctx.config.executors[reviewer];
     if backend
         .argv

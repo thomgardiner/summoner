@@ -98,7 +98,13 @@ impl Host for GitHost {
             receipt_finish: true,
             cargo_topology: false,
             cow_lanes: false,
+            // Live-worktree review is not a private capsule; held review is gated.
             inspection_capsule: false,
+            scope_includes_committed_delta: true,
+            verification_bound_to_source: true,
+            immutable_inspection_snapshot: false,
+            review_process_isolated: false,
+            finish_source_compare_and_swap: true,
             protected_paths: protected,
         }
     }
@@ -222,8 +228,10 @@ impl Host for GitHost {
             &["symbolic-ref", "--quiet", "--short", "HEAD"],
         )
         .ok();
+        let start_commit =
+            git_out(req.worktree, &["rev-parse", "HEAD"]).context("recording task start commit")?;
         let rec = TaskRecord {
-            schema_version: 1,
+            schema_version: 2,
             id: id.clone(),
             run_id: req.run_id.into(),
             order_id: req.order_id.into(),
@@ -234,6 +242,9 @@ impl Host for GitHost {
             claim_group: req.claim_group.map(String::from),
             branch,
             worktree: req.worktree.display().to_string(),
+            start_commit,
+            verify_source_commit: None,
+            verify_source_sha256: None,
             state: TaskState::Begun,
             verification: TaskVerification::default(),
             owner_pid: std::process::id(),
@@ -264,7 +275,7 @@ impl Host for GitHost {
         worktree: &Path,
         task_id: &str,
         allow_unverified: Option<&str>,
-        _expected_source_sha256: Option<&str>,
+        expected_source_sha256: Option<&str>,
     ) -> Result<FinishOutcome> {
         let rec = self.ledger.read(task_id)?;
         git_ledger::require_active(&rec)?;
@@ -273,39 +284,28 @@ impl Host for GitHost {
         } else {
             self.verify.required.clone()
         };
-        // Outside-scope check: any changed path not under claimed scope.
-        let base = "HEAD"; // diff vs last commit; caller verifies profiles separately
-        let changed = git_out(worktree, &["diff", "--name-only", "HEAD"]).unwrap_or_default();
-        let mut outside = Vec::new();
-        for line in changed.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            if !in_scope(line, &rec.scope) {
-                outside.push(line.to_string());
-            }
-        }
-        // Also unstaged/untracked via status
-        if let Ok(status) = git_out(worktree, &["status", "--porcelain"]) {
-            for line in status.lines() {
-                let path = line.get(3..).unwrap_or("").trim();
-                if path.is_empty() {
-                    continue;
-                }
-                let path = path.split(" -> ").last().unwrap_or(path);
-                if !in_scope(path, &rec.scope) {
-                    outside.push(path.to_string());
-                }
-            }
-        }
-        outside.sort();
-        outside.dedup();
+
+        let outside = outside_scope_paths(worktree, &rec)?;
         if !outside.is_empty() {
             let _ = self.claims.release(task_id);
             let _ = self.ledger.set_state(task_id, TaskState::Refused);
             return Ok(FinishOutcome::Refused {
                 reason: "scope".into(),
                 outside_scope: outside,
+                verification: None,
+            });
+        }
+
+        let head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
+        let head_digest = sha256_hex(head.as_bytes());
+        if let Some(expected) = expected_source_sha256
+            && expected != head_digest
+        {
+            let _ = self.claims.release(task_id);
+            let _ = self.ledger.set_state(task_id, TaskState::Refused);
+            return Ok(FinishOutcome::Refused {
+                reason: "source_changed".into(),
+                outside_scope: vec![],
                 verification: None,
             });
         }
@@ -318,25 +318,33 @@ impl Host for GitHost {
             failed: rec.verification.failed.clone(),
             verified: false,
         };
+        // Profiles bound to a prior candidate become stale if HEAD moved.
+        if let Some(bound) = rec.verify_source_commit.as_deref()
+            && bound != head
+        {
+            for profile in verification.passed.drain(..) {
+                if !verification.stale.contains(&profile) {
+                    verification.stale.push(profile);
+                }
+            }
+        }
         for profile in &required {
             if !verification.passed.contains(profile) {
-                if verification.failed.contains(profile) {
+                if verification.failed.contains(profile) || verification.stale.contains(profile) {
                     continue;
                 }
                 verification.missing.push(profile.clone());
             }
         }
-        // verified only when at least one required profile exists and all passed.
         verification.verified = !required.is_empty()
             && verification.missing.is_empty()
-            && verification.failed.is_empty();
+            && verification.failed.is_empty()
+            && verification.stale.is_empty();
 
         if required.is_empty() {
-            // No required profiles: finish is allowed, but not "verified".
             let _ = self.claims.release(task_id);
             self.ledger
                 .set_verification(task_id, verification.clone(), TaskState::Finished)?;
-            let _ = base;
             return Ok(FinishOutcome::Finished { verification });
         }
 
@@ -359,7 +367,6 @@ impl Host for GitHost {
         let _ = self.claims.release(task_id);
         self.ledger
             .set_verification(task_id, verification.clone(), TaskState::Finished)?;
-        let _ = base;
         Ok(FinishOutcome::Finished { verification })
     }
 
@@ -390,7 +397,8 @@ impl Host for GitHost {
                     "id": t.id,
                     "status": status,
                     "recorded_verification": recorded_verification,
-                    "source_sha256": null,
+                    "source_sha256": t.verify_source_sha256,
+                    "start_commit": t.start_commit,
                     "branch": t.branch,
                     "worktree": t.worktree,
                     "agent": t.agent,
@@ -471,9 +479,15 @@ impl Host for GitHost {
                 rec.verification.passed.push(profile.into());
             }
             rec.verification.failed.retain(|p| p != profile);
+            // Bind the green profile to the exact HEAD that was verified.
+            let head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
+            rec.verify_source_commit = Some(head.clone());
+            rec.verify_source_sha256 = Some(sha256_hex(head.as_bytes()));
         } else if !rec.verification.failed.contains(&profile.to_string()) {
             rec.verification.failed.push(profile.into());
             rec.verification.passed.retain(|p| p != profile);
+            rec.verify_source_commit = None;
+            rec.verify_source_sha256 = None;
         }
         self.ledger.write(&rec)?;
         Ok(VerifySummary {
@@ -494,13 +508,24 @@ impl Host for GitHost {
         task_id: &str,
         _lease_secs: u64,
     ) -> Result<InspectionAcquire> {
-        // Weak capsule: review runs in the worktree itself. Capsule digests
-        // are content hashes of HEAD for binding; not a Grove private clone.
+        // Weak capsule: review still runs in the live worktree (not isolated).
+        // Metadata is honest so the integrity gate can fail closed on mutation.
         let head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
         let source_sha256 = sha256_hex(head.as_bytes());
+        let capsule_id = format!("git-capsule-{task_id}");
+        let meta = serde_json::json!({
+            "task_id": task_id,
+            "source_sha256": source_sha256,
+            "head": head,
+            "worktree": worktree,
+        });
+        std::fs::write(
+            self.state_root.join(format!("{capsule_id}.json")),
+            serde_json::to_vec_pretty(&meta)?,
+        )?;
         Ok(InspectionAcquire {
             schema_version: 1,
-            capsule_id: format!("git-capsule-{task_id}"),
+            capsule_id,
             path: worktree.to_path_buf(),
             task_id: task_id.into(),
             source_sha256,
@@ -516,6 +541,12 @@ impl Host for GitHost {
     ) -> Result<InspectionExec> {
         use super::supervise;
         use std::sync::atomic::AtomicBool;
+        let meta_path = self.state_root.join(format!("{capsule_id}.json"));
+        let meta: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&meta_path).context("reading inspection capsule meta")?,
+        )?;
+        let task_id = meta["task_id"].as_str().unwrap_or("").to_string();
+        let bound = meta["source_sha256"].as_str().unwrap_or("").to_string();
         let stdout_path = self.state_root.join(format!("{capsule_id}-stdout.log"));
         let stderr_path = self.state_root.join(format!("{capsule_id}-stderr.log"));
         let stdout = std::fs::File::create(&stdout_path)?;
@@ -532,36 +563,75 @@ impl Host for GitHost {
         )?;
         let head = git_out(worktree, &["rev-parse", "HEAD"]).unwrap_or_default();
         let source_sha256 = sha256_hex(head.as_bytes());
+        let source_unchanged = source_sha256 == bound;
         let tree_clean = git_out(worktree, &["status", "--porcelain"])
             .map(|s| s.trim().is_empty())
             .unwrap_or(false);
+        let stdout_bytes = std::fs::read(&stdout_path).unwrap_or_default();
+        let stderr_bytes = std::fs::read(&stderr_path).unwrap_or_default();
+        let authorized = outcome.exit == Some(0) && tree_clean && source_unchanged;
         Ok(InspectionExec {
             schema_version: 1,
             capsule_id: capsule_id.into(),
-            task_id: String::new(),
+            task_id,
             exit_code: outcome.exit.unwrap_or(-1),
             timed_out: outcome.backup_killed,
             tree_clean,
-            source_unchanged: true,
-            capsule_unchanged: true,
-            authorized: outcome.exit == Some(0) && tree_clean,
-            source_sha256: source_sha256.clone(),
+            source_unchanged,
+            // Live worktree is the capsule; "unchanged" means path still exists.
+            capsule_unchanged: worktree.is_dir(),
+            authorized,
+            source_sha256,
             stdout: InspectionLog {
                 path: stdout_path,
-                sha256: source_sha256.clone(),
-                bytes: 0,
+                sha256: sha256_hex(&stdout_bytes),
+                bytes: stdout_bytes.len() as u64,
             },
             stderr: InspectionLog {
                 path: stderr_path,
-                sha256: source_sha256,
-                bytes: 0,
+                sha256: sha256_hex(&stderr_bytes),
+                bytes: stderr_bytes.len() as u64,
             },
         })
     }
 
-    fn inspection_release(&self, _worktree: &Path, _capsule_id: &str) -> Result<()> {
+    fn inspection_release(&self, _worktree: &Path, capsule_id: &str) -> Result<()> {
+        let _ = std::fs::remove_file(self.state_root.join(format!("{capsule_id}.json")));
+        let _ = std::fs::remove_file(self.state_root.join(format!("{capsule_id}-stdout.log")));
+        let _ = std::fs::remove_file(self.state_root.join(format!("{capsule_id}-stderr.log")));
         Ok(())
     }
+}
+
+/// Paths changed since task begin (commits + dirty tree) that leave scope.
+fn outside_scope_paths(worktree: &Path, rec: &TaskRecord) -> Result<Vec<String>> {
+    let mut outside = Vec::new();
+    let range = format!("{}..HEAD", rec.start_commit);
+    if let Ok(changed) = git_out(worktree, &["diff", "--name-only", &range]) {
+        for line in changed.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            if !in_scope(line, &rec.scope) {
+                outside.push(line.to_string());
+            }
+        }
+    }
+    if let Ok(status) = git_out(worktree, &["status", "--porcelain"]) {
+        for line in status.lines() {
+            let path = line.get(3..).unwrap_or("").trim();
+            if path.is_empty() {
+                continue;
+            }
+            let path = path.split(" -> ").last().unwrap_or(path);
+            if !in_scope(path, &rec.scope) {
+                outside.push(path.to_string());
+            }
+        }
+    }
+    outside.sort();
+    outside.dedup();
+    Ok(outside)
 }
 
 fn runs_parent() -> PathBuf {

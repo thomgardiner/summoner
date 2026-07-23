@@ -50,6 +50,11 @@ impl Host for GroveHost {
             cargo_topology: true,
             cow_lanes: true,
             inspection_capsule: true,
+            scope_includes_committed_delta: true,
+            verification_bound_to_source: true,
+            immutable_inspection_snapshot: true,
+            review_process_isolated: true,
+            finish_source_compare_and_swap: true,
             protected_paths: vec![
                 ".summoner.toml".into(),
                 ".grove.toml".into(),

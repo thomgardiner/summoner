@@ -22,6 +22,9 @@ const PROTECTED: &[&str] = &[
     "rust-toolchain.toml",
     ".cargo/config",
     ".cargo/config.toml",
+    // Judge / meta-verification authority (always on, not only under trusted policy).
+    ".crucible",
+    "Cargo.lock",
 ];
 
 /// Added-line markers that disable tests across the ecosystems we meet.

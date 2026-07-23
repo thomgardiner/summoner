@@ -1,13 +1,12 @@
-//! `summoner land`: integrate a finished run's verified candidate branches into
-//! the current branch, in dependency order, stopping at the first real conflict.
+//! `summoner land`: integrate a finished run's verified candidate commits into
+//! the current branch, in dependency order.
 //!
-//! This is the gated apply, not an auto-merge: it only touches candidates that
-//! already passed the run's bar (verified, or approved when a reviewer ran), and
-//! it merges the exact `candidate_commit` the report recorded — the commit that
-//! was reviewed, not whatever the branch points at now. A non-green order and
-//! everything downstream of it are set aside with a reason. The first conflict
-//! stops the run with the earlier merges already committed, so progress is never
-//! lost and the working tree is always left clean.
+//! Landing is not an auto-merge of branch tips. It merges the exact
+//! `candidate_commit` each report recorded (the reviewed commit) onto a
+//! temporary integration branch, runs an optional aggregate verify gate, and
+//! only then fast-forwards the protected target. A non-green order and
+//! everything downstream of it are set aside. The first conflict aborts the
+//! integration branch without advancing the target.
 
 use crate::report::is_green_outcome;
 use anyhow::{Context, Result, bail};
@@ -62,13 +61,13 @@ pub fn land(run_id: Option<String>, dry_run: bool) -> Result<i32> {
     let plan = plan_landing(candidates);
 
     if plan.order.is_empty() {
-        report_result(&repo, &plan, &[], None, dry_run)?;
+        report_result(&repo, &plan, &[], None, None, dry_run)?;
         // Nothing to land is a clean no-op, not a failure.
         return Ok(0);
     }
 
     if dry_run {
-        report_result(&repo, &plan, &[], None, true)?;
+        report_result(&repo, &plan, &[], None, None, true)?;
         return Ok(0);
     }
 
@@ -78,12 +77,25 @@ pub fn land(run_id: Option<String>, dry_run: bool) -> Result<i32> {
         bail!("working tree is not clean; commit or stash before landing");
     }
 
+    let target_branch = git(&repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .context("land requires a checked-out branch (not detached HEAD)")?;
+    let target_head = git(&repo, &["rev-parse", "HEAD"])?;
+    let run_slug = run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("run");
+    let integration = format!(
+        "smn/land-integration-{}-{}",
+        run_slug,
+        target_head.chars().take(8).collect::<String>()
+    );
+    // Create the integration branch from the protected tip and switch to it.
+    git(&repo, &["checkout", "-B", &integration, &target_head])?;
+
     let mut landed: Vec<Value> = Vec::new();
     let mut stopped: Option<Value> = None;
     for candidate in &plan.order {
         let commit = candidate.commit.as_deref().expect("landable has a commit");
-        // The reviewed commit must still exist; a reaped worktree that salvaged
-        // nothing could have left the report naming a commit that is now gone.
         if git(&repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_err() {
             stopped = Some(json!({
                 "id": candidate.id,
@@ -94,7 +106,6 @@ pub fn land(run_id: Option<String>, dry_run: bool) -> Result<i32> {
         match merge(&repo, &candidate.id, commit) {
             Ok(mode) => landed.push(json!({"id": candidate.id, "commit": commit, "mode": mode})),
             Err(conflict) => {
-                // Leave the tree exactly as it was before this merge.
                 let _ = git(&repo, &["merge", "--abort"]);
                 stopped = Some(json!({"id": candidate.id, "commit": commit, "reason": conflict}));
                 break;
@@ -102,10 +113,95 @@ pub fn land(run_id: Option<String>, dry_run: bool) -> Result<i32> {
         }
     }
 
-    let stopped_here = stopped.is_some();
-    report_result(&repo, &plan, &landed, stopped, false)?;
-    // A conflict is a domain refusal the caller must resolve, not a crash.
-    Ok(if stopped_here { 1 } else { 0 })
+    let mut aggregate: Option<Value> = None;
+    if stopped.is_none() {
+        match aggregate_verify(&repo) {
+            Ok(report) => aggregate = Some(report),
+            Err(error) => {
+                stopped = Some(json!({
+                    "id": "_aggregate",
+                    "reason": format!("aggregate verify failed: {error:#}"),
+                }));
+            }
+        }
+    }
+
+    if stopped.is_some() {
+        // Leave the integration branch for inspection; do not advance the target.
+        git(&repo, &["checkout", &target_branch])?;
+        report_result(&repo, &plan, &landed, stopped, aggregate, false)?;
+        return Ok(1);
+    }
+
+    // Advance the protected target only after the integrated state is clean.
+    let integrated = git(&repo, &["rev-parse", "HEAD"])?;
+    git(&repo, &["checkout", &target_branch])?;
+    git(&repo, &["merge", "--ff-only", &integrated])
+        .context("fast-forwarding the target branch onto the integration result")?;
+    let _ = Command::new("git")
+        .args(["branch", "-D", &integration])
+        .current_dir(&repo)
+        .output();
+
+    report_result(&repo, &plan, &landed, None, aggregate, false)?;
+    Ok(0)
+}
+
+/// Optional post-integration gate. `SUMMONER_LAND_VERIFY` is a shell-free argv
+/// joined by ASCII unit separator `\x1f` (program then args), or a single
+/// program name. When unset, only `cargo test --locked` runs if `Cargo.toml`
+/// exists; otherwise the gate is a no-op success.
+fn aggregate_verify(repo: &Path) -> Result<Value> {
+    if let Ok(raw) = std::env::var("SUMMONER_LAND_VERIFY") {
+        let argv: Vec<&str> = if raw.contains('\u{1f}') {
+            raw.split('\u{1f}').filter(|s| !s.is_empty()).collect()
+        } else {
+            raw.split_whitespace().collect()
+        };
+        if argv.is_empty() {
+            bail!("SUMMONER_LAND_VERIFY is empty");
+        }
+        let output = Command::new(argv[0])
+            .args(&argv[1..])
+            .current_dir(repo)
+            .output()
+            .with_context(|| format!("running land verify {}", argv[0]))?;
+        if !output.status.success() {
+            bail!(
+                "{} exited {:?}: {}",
+                argv[0],
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        return Ok(json!({
+            "command": argv,
+            "passed": true,
+        }));
+    }
+    if repo.join("Cargo.toml").is_file() {
+        let output = Command::new("cargo")
+            .args(["test", "--locked", "--", "--test-threads=1"])
+            .current_dir(repo)
+            .output()
+            .context("running cargo test as land aggregate verify")?;
+        if !output.status.success() {
+            bail!(
+                "cargo test exited {:?}: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        return Ok(json!({
+            "command": ["cargo", "test", "--locked"],
+            "passed": true,
+        }));
+    }
+    Ok(json!({
+        "command": [],
+        "passed": true,
+        "detail": "no SUMMONER_LAND_VERIFY and no Cargo.toml; aggregate gate skipped",
+    }))
 }
 
 /// Project the report's orders into landing candidates.
@@ -246,6 +342,7 @@ fn report_result(
     plan: &Plan,
     landed: &[Value],
     stopped: Option<Value>,
+    aggregate: Option<Value>,
     dry_run: bool,
 ) -> Result<()> {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_default();
@@ -265,6 +362,7 @@ fn report_result(
             "landed": landed,
             "skipped": skipped,
             "stopped": stopped,
+            "aggregate": aggregate,
         }))?
     );
     Ok(())

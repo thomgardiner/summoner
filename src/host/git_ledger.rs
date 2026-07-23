@@ -31,6 +31,14 @@ pub struct TaskRecord {
     pub claim_group: Option<String>,
     pub branch: Option<String>,
     pub worktree: String,
+    /// Immutable HEAD at task begin; scope and finish compare against this.
+    pub start_commit: String,
+    /// HEAD (or bound source digest) when each required profile last passed.
+    #[serde(default)]
+    pub verify_source_commit: Option<String>,
+    /// Content digest of the candidate when verification last fully passed.
+    #[serde(default)]
+    pub verify_source_sha256: Option<String>,
     pub state: TaskState,
     pub verification: crate::grove::TaskVerification,
     pub owner_pid: u32,

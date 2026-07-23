@@ -111,15 +111,36 @@ pub struct TrustedPolicy {
     /// default: under a trusted policy a dependency chain is only as green as
     /// its weakest link, so unverified links must be accepted deliberately.
     pub completed_satisfies_dependencies: bool,
+    /// When set, the resolved host kind must match (e.g. `"grove"`). Prevents
+    /// silent fallback from exact-state Grove to the weaker Git host.
+    pub required_host: Option<String>,
+    /// Exact-state host capabilities that must be true. Empty means no
+    /// capability pin beyond `required_host` / reviewer rules.
+    pub required_capabilities: crate::host::RequiredHostCapabilities,
 }
 
 impl TrustedPolicy {
+    /// Paths that always join the tripwire protected set under a trusted policy
+    /// (judge inputs and supply-chain surface), plus any operator extras.
+    pub fn effective_protected_paths(&self) -> Vec<String> {
+        let mut paths = JUDGE_PROTECTED_PATHS
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect::<Vec<_>>();
+        for path in &self.protected_paths {
+            if !paths.iter().any(|existing| existing == path) {
+                paths.push(path.clone());
+            }
+        }
+        paths
+    }
+
     /// Content address of the exact policy in force, for the manifest and report.
     pub fn sha256(&self) -> String {
         use sha2::{Digest, Sha256};
         use std::fmt::Write;
         let mut hash = Sha256::new();
-        hash.update(b"summoner.trusted-policy.v1\0");
+        hash.update(b"summoner.trusted-policy.v2\0");
         hash.update(serde_json::to_vec(self).expect("policy serializes"));
         let mut hex = String::with_capacity(64);
         for byte in hash.finalize() {
@@ -128,6 +149,16 @@ impl TrustedPolicy {
         hex
     }
 }
+
+/// Authority surfaces Crucible and Summoner judge inputs share. Always protected
+/// when a trusted policy is active so an executor cannot weaken its own bar.
+pub const JUDGE_PROTECTED_PATHS: &[&str] = &[
+    ".crucible",
+    "Cargo.lock",
+    "checks",
+    "hooks",
+    ".github/workflows",
+];
 
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]

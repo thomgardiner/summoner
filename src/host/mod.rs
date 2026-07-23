@@ -14,7 +14,10 @@ mod verify_config;
 
 pub use git_host::GitHost;
 pub use grove_host::GroveHost;
-pub use types::{ExecutionPlan, HostCapabilities, HostInfo, TaskBeginRequest, WorktreeRequest};
+pub use types::{
+    ExecutionPlan, HostCapabilities, HostInfo, RequiredHostCapabilities, TaskBeginRequest,
+    WorktreeRequest,
+};
 pub use verify_config::VerificationConfig;
 
 use crate::config::Config;
@@ -140,7 +143,10 @@ pub fn resolve(config: &Config, repo: &Path) -> ResolvedHost {
     ResolvedHost {
         kind: "git".into(),
         grove_bin: None,
-        notice: None,
+        notice: Some(
+            "summoner: using git host (weaker exact-state guarantees than grove; set [host] kind explicitly)"
+                .into(),
+        ),
     }
 }
 
@@ -149,13 +155,13 @@ pub fn open(config: &Config, repo: &Path) -> Result<Arc<dyn Host>> {
     if let Some(notice) = &resolved.notice {
         eprintln!("{notice}");
     }
-    match resolved.kind.as_str() {
+    let host: Arc<dyn Host> = match resolved.kind.as_str() {
         "grove" => {
             let bin = resolved
                 .grove_bin
                 .clone()
                 .unwrap_or_else(|| config.grove_bin());
-            Ok(Arc::new(GroveHost::new(bin)))
+            Arc::new(GroveHost::new(bin))
         }
         "git" => {
             let root = config
@@ -164,10 +170,46 @@ pub fn open(config: &Config, repo: &Path) -> Result<Arc<dyn Host>> {
                 .and_then(|h| h.worktree_root.clone())
                 .map(PathBuf::from);
             let verify = verify_config::load(config);
-            Ok(Arc::new(GitHost::new(repo, root, verify)?))
+            Arc::new(GitHost::new(repo, root, verify)?)
         }
         other => bail!("unknown host kind {other:?}"),
+    };
+    assert_host_policy(config, &resolved, &host.capabilities())?;
+    Ok(host)
+}
+
+/// Refuse runs that would silently drop below the trusted policy's host bar.
+pub fn assert_host_policy(
+    config: &Config,
+    resolved: &ResolvedHost,
+    caps: &HostCapabilities,
+) -> Result<()> {
+    if let Some(policy) = config.trusted_policy.as_ref() {
+        if let Some(required) = policy.required_host.as_deref()
+            && !resolved.kind.eq_ignore_ascii_case(required)
+        {
+            bail!(
+                "trusted policy requires host {required:?}, resolved host is {:?}",
+                resolved.kind
+            );
+        }
+        let missing = policy.required_capabilities.unsatisfied_by(caps);
+        if !missing.is_empty() {
+            bail!(
+                "host {:?} lacks required capabilities: {}",
+                resolved.kind,
+                missing.join(", ")
+            );
+        }
+        if policy.require_reviewer && !caps.supports_held_review() {
+            bail!(
+                "trusted policy requires a reviewer but host {:?} lacks held-review capabilities ({}); set [host] kind = \"grove\"",
+                resolved.kind,
+                caps.missing_for_held_review().join(", ")
+            );
+        }
     }
+    Ok(())
 }
 
 fn which(bin: &str) -> bool {

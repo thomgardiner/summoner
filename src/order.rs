@@ -337,6 +337,26 @@ fn policy_problems(
     if policy.require_reviewer && reviewer.is_none() {
         problems.push("trusted policy requires an independent reviewer".to_string());
     }
+    if policy.require_reviewer {
+        // Held review needs an immutable capsule host; do not schedule review
+        // against a host that cannot isolate the candidate.
+        if let Some(host) = config.host.as_ref().and_then(|h| h.kind.as_deref())
+            && host.eq_ignore_ascii_case("git")
+        {
+            problems.push(
+                "trusted policy requires a reviewer but host kind \"git\" lacks immutable inspection and finish CAS; set [host] kind = \"grove\" or drop require_reviewer"
+                    .into(),
+            );
+        }
+    }
+    if let Some(required) = policy.required_host.as_deref()
+        && let Some(configured) = config.host.as_ref().and_then(|h| h.kind.as_deref())
+        && !configured.eq_ignore_ascii_case(required)
+    {
+        problems.push(format!(
+            "trusted policy requires host {required:?}, but config selects {configured:?}"
+        ));
+    }
     if let (Some(reviewer), Some(executor)) = (reviewer.as_deref(), order.executor_name(config)) {
         if policy.distinct_reviewer_name && reviewer == executor {
             problems.push(format!(
@@ -1031,6 +1051,8 @@ acceptance = ["tests pass"]
             allowed_reviewers: vec!["judge".into()],
             protected_paths: Vec::new(),
             completed_satisfies_dependencies: false,
+            required_host: None,
+            required_capabilities: crate::host::RequiredHostCapabilities::default(),
         });
 
         // Ungated, wrong profile: every demand is named in one pass.
@@ -1064,7 +1086,26 @@ acceptance = ["tests pass"]
             "{text}"
         );
 
-        // A compliant order validates clean under the same policy.
+        // Held review is refused on the git host even when a reviewer is named.
+        config.host = Some(crate::config::HostSettings {
+            kind: Some("git".into()),
+            bin: None,
+            worktree_root: None,
+        });
+        let reviewed = write_order(
+            dir.path(),
+            "reviewed-git.toml",
+            "id = \"rg\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\n\
+             executor = \"fake\"\nreviewer = \"judge\"\nverify_profile = \"full\"\n",
+        );
+        let text = validate(&load(&[reviewed]).unwrap(), &config).join("\n");
+        assert!(
+            text.contains("lacks immutable inspection") || text.contains("kind = \"grove\""),
+            "{text}"
+        );
+
+        // A compliant order validates clean under the same policy without a git host pin.
+        config.host = None;
         let good = write_order(
             dir.path(),
             "good.toml",

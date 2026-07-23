@@ -509,9 +509,9 @@ impl<'a> OrderRun<'a> {
             .config
             .trusted_policy
             .as_ref()
-            .map(|policy| policy.protected_paths.as_slice())
+            .map(|policy| policy.effective_protected_paths())
             .unwrap_or_default();
-        let trips = tripwires::scan(&self.worktree, &self.base, policy_protected)?;
+        let trips = tripwires::scan(&self.worktree, &self.base, &policy_protected)?;
         // Extend, not assign: scrape_output may already have added a run-quality
         // warning (an unmatched usage_marker) that must not be wiped by the
         // diff scan. Tripwires are cleared once per attempt, so this never

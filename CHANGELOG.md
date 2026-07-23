@@ -10,18 +10,29 @@ exec capability, and pinned verification policy).
 
 ### Added
 
+- Host capability surface for exact-state guarantees
+  (`scope_includes_committed_delta`, `verification_bound_to_source`,
+  `immutable_inspection_snapshot`, `review_process_isolated`,
+  `finish_source_compare_and_swap`). Trusted policy can pin `required_host`
+  and `required_capabilities`; held review is refused on hosts that cannot
+  isolate a candidate (the git host is not equivalent to Grove).
+- Git host records `start_commit` at task begin, scopes against committed
+  deltas since begin (not only dirty tree), binds verification to HEAD, and
+  enforces finish-time source compare-and-swap. Inspection metadata is honest
+  (real log digests, source_unchanged) so integrity fails closed on mutation.
+- `summoner land` merges candidates onto a temporary integration branch, runs
+  an optional aggregate verify (`SUMMONER_LAND_VERIFY` or `cargo test` when a
+  Cargo.toml exists), and only then fast-forwards the protected target. Partial
+  integration never advances the target on conflict.
+- Built-in tripwire protection for `.crucible` and `Cargo.lock`; trusted
+  policies also protect `checks/`, `hooks/`, and `.github/workflows/`.
 - `summoner overview` prints one pane across every fleet and Grove repo on the
   machine: each summoner run's repo and order tally (active first), and each
   Grove repo's recent coordination activity by category, folded from the same
   best-effort NDJSON journals `watch` reads. `--watch` redraws it live. No more
   visiting a dozen repos to see what is running.
 - `summoner land [run-id]` integrates a finished run's verified candidate
-  commits into the current branch in dependency order, fast-forwarding when git
-  can. It only touches candidates that passed the run's bar and merges the exact
-  reviewed commit; non-green orders and their dependents are set aside with a
-  reason. The first conflict stops the run with the earlier merges committed and
-  the tree left clean, exiting 1. `--dry-run` prints the plan. Gated apply, not
-  an auto-merge — the review is still yours to author.
+  commits (see above). `--dry-run` prints the plan.
 - `[notify] command = [...]` runs when a run finishes, an order lands non-green,
   or a review starts, so you can leave a fleet unattended. The command gets the
   event's JSON line on stdin and `SUMMONER_NOTIFY_TITLE`/`_BODY`/`_EVENT` in the
