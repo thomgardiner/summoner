@@ -204,7 +204,13 @@ fn policy_signature_is_excluded_from_digest_and_verifies_with_key() {
     policy.signature = Some("0".repeat(64));
     assert_eq!(policy.verify_signature().unwrap(), Some(false));
     policy.require_signature = true;
-    assert!(policy.verify_signature().unwrap_err().to_string().contains("does not match"));
+    assert!(
+        policy
+            .verify_signature()
+            .unwrap_err()
+            .to_string()
+            .contains("does not match")
+    );
     unsafe { std::env::remove_var("SUMMONER_POLICY_KEY") };
 }
 

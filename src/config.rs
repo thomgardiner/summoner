@@ -232,9 +232,9 @@ impl TrustedPolicy {
             Some(raw.into_bytes())
         });
         match (&self.signature, self.require_signature, key) {
-            (None, true, _) => anyhow::bail!(
-                "trusted_policy.require_signature is set but signature is missing"
-            ),
+            (None, true, _) => {
+                anyhow::bail!("trusted_policy.require_signature is set but signature is missing")
+            }
             (Some(_), true, None) => anyhow::bail!(
                 "trusted_policy.require_signature is set but SUMMONER_POLICY_KEY is unset"
             ),

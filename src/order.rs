@@ -414,10 +414,7 @@ fn policy_revocation_problems(
         ));
     }
     if let Some(reviewer) = reviewer
-        && policy
-            .revoked_reviewers
-            .iter()
-            .any(|name| name == reviewer)
+        && policy.revoked_reviewers.iter().any(|name| name == reviewer)
     {
         problems.push(format!(
             "trusted policy revokes reviewer {reviewer:?} under epoch {}",
