@@ -99,6 +99,10 @@ pub struct RunReport {
     /// declared: the report states which bar its outcomes were judged against.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trusted_policy_sha256: Option<String>,
+    /// Versioned policy identity (epoch, issuer, signature status) when a
+    /// trusted policy gated the run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trusted_policy_identity: Option<crate::config::PolicyIdentity>,
     pub orders: Vec<OrderReport>,
 }
 
@@ -111,6 +115,7 @@ impl RunReport {
         duration_secs: u64,
         mut orders: Vec<OrderReport>,
         trusted_policy_sha256: Option<String>,
+        trusted_policy_identity: Option<crate::config::PolicyIdentity>,
     ) -> Self {
         orders.sort_by(|a, b| a.outcome.cmp(&b.outcome).then(a.id.cmp(&b.id)));
         let mut summary = BTreeMap::new();
@@ -137,8 +142,30 @@ impl RunReport {
             cache_read_tokens,
             cache_write_tokens,
             trusted_policy_sha256,
+            trusted_policy_identity,
             orders,
         }
+    }
+
+    /// Assemble without a versioned policy identity envelope (tests / legacy callers).
+    #[cfg(test)]
+    pub fn assemble_digest_only(
+        run_id: String,
+        repo: String,
+        started_at: u64,
+        duration_secs: u64,
+        orders: Vec<OrderReport>,
+        trusted_policy_sha256: Option<String>,
+    ) -> Self {
+        Self::assemble(
+            run_id,
+            repo,
+            started_at,
+            duration_secs,
+            orders,
+            trusted_policy_sha256,
+            None,
+        )
     }
 
     /// 0 only when every order carries fresh receipts (with reviewer approval
@@ -383,7 +410,7 @@ mod tests {
 
     #[test]
     fn orders_rank_worst_first_and_summary_counts() {
-        let report = RunReport::assemble(
+        let report = RunReport::assemble_digest_only(
             "r".into(),
             "/repo".into(),
             0,
@@ -402,7 +429,7 @@ mod tests {
         assert_eq!(report.summary["stalled"], 1);
         assert_eq!(report.exit_code(), 1);
 
-        let green = RunReport::assemble(
+        let green = RunReport::assemble_digest_only(
             "r".into(),
             "/repo".into(),
             0,

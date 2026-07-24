@@ -337,6 +337,7 @@ fn policy_problems(
     if policy.require_reviewer && reviewer.is_none() {
         problems.push("trusted policy requires an independent reviewer".to_string());
     }
+    policy_revocation_problems(order, config, policy, reviewer.as_deref(), &mut problems);
     if let Some(required) = policy.required_host.as_deref()
         && let Some(configured) = config.host.as_ref().and_then(|h| h.kind.as_deref())
         && !configured.eq_ignore_ascii_case(required)
@@ -345,41 +346,7 @@ fn policy_problems(
             "trusted policy requires host {required:?}, but config selects {configured:?}"
         ));
     }
-    if let (Some(reviewer), Some(executor)) = (reviewer.as_deref(), order.executor_name(config)) {
-        if policy.distinct_reviewer_name && reviewer == executor {
-            problems.push(format!(
-                "trusted policy requires a reviewer distinct from executor {executor:?}"
-            ));
-        }
-        if policy.distinct_reviewer_identity {
-            let e_id = config
-                .executors
-                .get(&executor)
-                .and_then(|b| b.identity.as_deref());
-            let r_id = config
-                .executors
-                .get(reviewer)
-                .and_then(|b| b.identity.as_deref());
-            match (e_id, r_id) {
-                (Some(e), Some(r)) if e == r => problems.push(format!(
-                    "trusted policy requires distinct reviewer identity; executor and reviewer both declare {e:?}"
-                )),
-                (None, _) | (_, None) => problems.push(
-                    "trusted policy requires distinct_reviewer_identity; set identity on both executor and reviewer backends"
-                        .into(),
-                ),
-                _ => {}
-            }
-        }
-        if !policy.allowed_reviewers.is_empty()
-            && !policy.allowed_reviewers.iter().any(|name| name == reviewer)
-        {
-            problems.push(format!(
-                "trusted policy does not allow reviewer {reviewer:?} (allowed: {})",
-                policy.allowed_reviewers.join(", ")
-            ));
-        }
-    }
+    policy_reviewer_executor_problems(order, config, policy, reviewer.as_deref(), &mut problems);
     if let Some(executor) = order.executor_name(config)
         && !policy.allowed_executors.is_empty()
         && !policy
@@ -426,6 +393,85 @@ fn policy_problems(
         }
     }
     problems
+}
+
+fn policy_revocation_problems(
+    order: &Order,
+    config: &Config,
+    policy: &crate::config::TrustedPolicy,
+    reviewer: Option<&str>,
+    problems: &mut Vec<String>,
+) {
+    if let Some(executor) = order.executor_name(config)
+        && policy
+            .revoked_executors
+            .iter()
+            .any(|name| name == &executor)
+    {
+        problems.push(format!(
+            "trusted policy revokes executor {executor:?} under epoch {}",
+            policy.policy_epoch
+        ));
+    }
+    if let Some(reviewer) = reviewer
+        && policy
+            .revoked_reviewers
+            .iter()
+            .any(|name| name == reviewer)
+    {
+        problems.push(format!(
+            "trusted policy revokes reviewer {reviewer:?} under epoch {}",
+            policy.policy_epoch
+        ));
+    }
+}
+
+fn policy_reviewer_executor_problems(
+    order: &Order,
+    config: &Config,
+    policy: &crate::config::TrustedPolicy,
+    reviewer: Option<&str>,
+    problems: &mut Vec<String>,
+) {
+    let Some(reviewer) = reviewer else {
+        return;
+    };
+    let Some(executor) = order.executor_name(config) else {
+        return;
+    };
+    if policy.distinct_reviewer_name && reviewer == executor {
+        problems.push(format!(
+            "trusted policy requires a reviewer distinct from executor {executor:?}"
+        ));
+    }
+    if policy.distinct_reviewer_identity {
+        let e_id = config
+            .executors
+            .get(&executor)
+            .and_then(|b| b.identity.as_deref());
+        let r_id = config
+            .executors
+            .get(reviewer)
+            .and_then(|b| b.identity.as_deref());
+        match (e_id, r_id) {
+            (Some(e), Some(r)) if e == r => problems.push(format!(
+                "trusted policy requires distinct reviewer identity; executor and reviewer both declare {e:?}"
+            )),
+            (None, _) | (_, None) => problems.push(
+                "trusted policy requires distinct_reviewer_identity; set identity on both executor and reviewer backends"
+                    .into(),
+            ),
+            _ => {}
+        }
+    }
+    if !policy.allowed_reviewers.is_empty()
+        && !policy.allowed_reviewers.iter().any(|name| name == reviewer)
+    {
+        problems.push(format!(
+            "trusted policy does not allow reviewer {reviewer:?} (allowed: {})",
+            policy.allowed_reviewers.join(", ")
+        ));
+    }
 }
 
 /// Kahn's elimination: whatever cannot be topologically drained is in (or
@@ -1072,15 +1118,10 @@ acceptance = ["tests pass"]
         config.trusted_policy = Some(crate::config::TrustedPolicy {
             require_reviewer: true,
             distinct_reviewer_name: true,
-            distinct_reviewer_identity: false,
             allowed_profiles: vec!["full".into()],
-            required_profiles: Vec::new(),
             allowed_executors: vec!["fake".into()],
             allowed_reviewers: vec!["judge".into()],
-            protected_paths: Vec::new(),
-            completed_satisfies_dependencies: false,
-            required_host: None,
-            required_capabilities: crate::host::RequiredHostCapabilities::default(),
+            ..Default::default()
         });
 
         // Ungated, wrong profile: every demand is named in one pass.

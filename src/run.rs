@@ -43,6 +43,11 @@ pub fn run(
         .context("resolving current directory")?
         .canonicalize()
         .context("canonicalizing repository path")?;
+    if let Some(policy) = config.trusted_policy.as_ref() {
+        policy
+            .verify_signature()
+            .context("trusted_policy signature check failed")?;
+    }
     let host = host::open(config, &repo)?;
     let _info = host.preflight()?;
     let orders = crate::run_prepare::validated(paths, config)?;
@@ -147,13 +152,13 @@ pub(crate) fn execute(
     ctx.events.check()?;
     let orders = crate::run_journal::terminal_reports(&run_dir.join("events.jsonl"), &run_id)
         .context("projecting order reports from the run journal")?;
-    let report = RunReport::assemble(
+    let report = assemble_run_report(
+        &config,
         run_id,
         repo.display().to_string(),
         started_at,
         started.elapsed().as_secs(),
         orders,
-        config.trusted_policy.as_ref().map(|policy| policy.sha256()),
     );
     // Fail closed: record run_finished before publishing report.json or the scorecard.
     ctx.events.emit(
@@ -191,6 +196,29 @@ pub(crate) fn runs_root() -> PathBuf {
         std::env::var_os("HOME"),
         std::env::var_os("USERPROFILE"),
         std::env::temp_dir(),
+    )
+}
+
+fn assemble_run_report(
+    config: &Config,
+    run_id: String,
+    repo: String,
+    started_at: u64,
+    duration_secs: u64,
+    orders: Vec<OrderReport>,
+) -> RunReport {
+    let policy_identity = config.trusted_policy.as_ref().map(|policy| {
+        let signature_valid = policy.verify_signature().ok().flatten();
+        policy.identity(signature_valid)
+    });
+    RunReport::assemble(
+        run_id,
+        repo,
+        started_at,
+        duration_secs,
+        orders,
+        config.trusted_policy.as_ref().map(|policy| policy.sha256()),
+        policy_identity,
     )
 }
 

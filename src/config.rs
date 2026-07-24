@@ -90,6 +90,24 @@ pub struct Notify {
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrustedPolicy {
+    /// Operator-chosen stable name for this policy document (e.g. `org-default`).
+    pub policy_id: Option<String>,
+    /// Monotonic document version for humans and compatibility notes.
+    pub policy_version: Option<String>,
+    /// Monotonic safety epoch. Resume refuses when the recorded run's epoch is
+    /// below the live policy's `minimum_resumable_epoch`.
+    pub policy_epoch: u64,
+    /// Floor for resume: runs recorded under an older epoch cannot continue
+    /// under this live policy. Zero means no floor.
+    pub minimum_resumable_epoch: u64,
+    /// Authority that published this policy (operator label, not a crypto DN).
+    pub issuer: Option<String>,
+    /// Optional hex MAC of the policy body (excluding `signature`) under the
+    /// operator signing key. When `require_signature` is true, verification
+    /// is mandatory. Domain-separated SHA-256 MAC — not a public-key signature.
+    pub signature: Option<String>,
+    /// Refuse to load/use the policy when `signature` is missing or invalid.
+    pub require_signature: bool,
     /// Every order must carry an independent reviewer; `reviewer = "none"` is refused.
     pub require_reviewer: bool,
     /// The reviewer's configured name must differ from the executor's. This
@@ -111,6 +129,12 @@ pub struct TrustedPolicy {
     pub allowed_executors: Vec<String>,
     /// Closed set of reviewer names; empty allows any configured.
     pub allowed_reviewers: Vec<String>,
+    /// Executor names banned for new work under this epoch (emergency ban).
+    /// Also re-checked against residual orders on resume under the live policy.
+    pub revoked_executors: Vec<String>,
+    /// Reviewer names banned for new work under this epoch.
+    /// Also re-checked against residual orders on resume under the live policy.
+    pub revoked_reviewers: Vec<String>,
     /// Protected paths beyond the built-in verification contract files. A diff
     /// touching one caps the order at `unverified`, like the built-ins.
     pub protected_paths: Vec<String>,
@@ -124,6 +148,18 @@ pub struct TrustedPolicy {
     /// Exact-state host capabilities that must be true. Empty means no
     /// capability pin beyond `required_host` / reviewer rules.
     pub required_capabilities: crate::host::RequiredHostCapabilities,
+}
+
+/// Identity envelope bound into run evidence alongside the policy digest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PolicyIdentity {
+    pub policy_id: Option<String>,
+    pub policy_version: Option<String>,
+    pub policy_epoch: u64,
+    pub issuer: Option<String>,
+    pub policy_sha256: String,
+    pub signature_present: bool,
+    pub signature_valid: Option<bool>,
 }
 
 impl TrustedPolicy {
@@ -143,18 +179,105 @@ impl TrustedPolicy {
     }
 
     /// Content address of the exact policy in force, for the manifest and report.
+    /// The `signature` field is excluded so the MAC covers the rest of the body.
     pub fn sha256(&self) -> String {
         use sha2::{Digest, Sha256};
         use std::fmt::Write;
         let mut hash = Sha256::new();
-        hash.update(b"summoner.trusted-policy.v3\0");
-        hash.update(serde_json::to_vec(self).expect("policy serializes"));
+        hash.update(b"summoner.trusted-policy.v4\0");
+        hash.update(serde_json::to_vec(&self.body_for_digest()).expect("policy serializes"));
         let mut hex = String::with_capacity(64);
         for byte in hash.finalize() {
             write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
         }
         hex
     }
+
+    /// Policy body used for digests and MACs (signature omitted).
+    fn body_for_digest(&self) -> TrustedPolicy {
+        let mut body = self.clone();
+        body.signature = None;
+        body
+    }
+
+    /// Domain-separated MAC of the policy body under an operator secret.
+    pub fn mac_hex(key: &[u8], body_digest: &str) -> String {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+        let mut hash = Sha256::new();
+        hash.update(b"summoner.trusted-policy.mac.v1\0");
+        let key_len = (key.len() as u64).to_le_bytes();
+        hash.update(key_len);
+        hash.update(key);
+        hash.update([0]);
+        hash.update(body_digest.as_bytes());
+        let mut hex = String::with_capacity(64);
+        for byte in hash.finalize() {
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        hex
+    }
+
+    /// Verify optional signature against `SUMMONER_POLICY_KEY` (raw secret
+    /// bytes as provided by the environment; not hex-decoded).
+    /// Returns `Ok(None)` when no signature is required or present without a key
+    /// check; `Ok(Some(true/false))` when verification ran; `Err` when required
+    /// and missing/invalid.
+    pub fn verify_signature(&self) -> anyhow::Result<Option<bool>> {
+        let key = std::env::var_os("SUMMONER_POLICY_KEY").and_then(|v| {
+            let raw = v.into_string().ok()?;
+            if raw.is_empty() {
+                return None;
+            }
+            Some(raw.into_bytes())
+        });
+        match (&self.signature, self.require_signature, key) {
+            (None, true, _) => anyhow::bail!(
+                "trusted_policy.require_signature is set but signature is missing"
+            ),
+            (Some(_), true, None) => anyhow::bail!(
+                "trusted_policy.require_signature is set but SUMMONER_POLICY_KEY is unset"
+            ),
+            (Some(sig), require, Some(key)) => {
+                let expected = Self::mac_hex(&key, &self.sha256());
+                let ok = constant_time_eq(sig.as_bytes(), expected.as_bytes());
+                if require && !ok {
+                    anyhow::bail!("trusted_policy signature does not match SUMMONER_POLICY_KEY");
+                }
+                Ok(Some(ok))
+            }
+            (Some(_), false, None) => Ok(None), // recorded but not checked
+            (None, false, _) => Ok(None),
+        }
+    }
+
+    pub fn identity(&self, signature_valid: Option<bool>) -> PolicyIdentity {
+        PolicyIdentity {
+            policy_id: self.policy_id.clone(),
+            policy_version: self.policy_version.clone(),
+            policy_epoch: self.policy_epoch,
+            issuer: self.issuer.clone(),
+            policy_sha256: self.sha256(),
+            signature_present: self.signature.is_some(),
+            signature_valid,
+        }
+    }
+
+    /// Resume safety floor: recorded epoch must be >= live minimum.
+    pub fn allows_resume_of(&self, recorded_epoch: u64) -> bool {
+        recorded_epoch >= self.minimum_resumable_epoch
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Authority surfaces Crucible and Summoner judge inputs share. Always protected

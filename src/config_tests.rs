@@ -175,6 +175,75 @@ fn a_trusted_policy_digest_changes_with_every_field_that_narrows_it() {
     let mut protected = base.clone();
     protected.protected_paths = vec!["ci/verify.sh".into()];
     assert_ne!(protected.sha256(), baseline);
+
+    let mut epoch = base.clone();
+    epoch.policy_epoch = 2;
+    assert_ne!(epoch.sha256(), baseline);
+}
+
+#[test]
+fn policy_signature_is_excluded_from_digest_and_verifies_with_key() {
+    let mut policy = crate::config::TrustedPolicy {
+        policy_id: Some("org".into()),
+        policy_epoch: 3,
+        issuer: Some("security".into()),
+        require_reviewer: true,
+        ..Default::default()
+    };
+    let digest = policy.sha256();
+    let key = b"test-operator-key";
+    let mac = crate::config::TrustedPolicy::mac_hex(key, &digest);
+    policy.signature = Some(mac.clone());
+    // Signature must not alter the content digest of the body.
+    assert_eq!(policy.sha256(), digest);
+
+    // SAFETY: single-threaded test process; restore after.
+    unsafe { std::env::set_var("SUMMONER_POLICY_KEY", "test-operator-key") };
+    assert_eq!(policy.verify_signature().unwrap(), Some(true));
+
+    policy.signature = Some("0".repeat(64));
+    assert_eq!(policy.verify_signature().unwrap(), Some(false));
+    policy.require_signature = true;
+    assert!(policy.verify_signature().unwrap_err().to_string().contains("does not match"));
+    unsafe { std::env::remove_var("SUMMONER_POLICY_KEY") };
+}
+
+#[test]
+fn resume_floor_rejects_older_epochs() {
+    let live = crate::config::TrustedPolicy {
+        policy_epoch: 10,
+        minimum_resumable_epoch: 7,
+        ..Default::default()
+    };
+    assert!(live.allows_resume_of(7));
+    assert!(live.allows_resume_of(10));
+    assert!(!live.allows_resume_of(6));
+}
+
+#[test]
+fn revoked_executor_is_refused_by_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config {
+        default_executor: Some("codex".into()),
+        ..Config::default()
+    };
+    config.executors.insert("codex".into(), backend(&["codex"]));
+    config.trusted_policy = Some(crate::config::TrustedPolicy {
+        revoked_executors: vec!["codex".into()],
+        policy_epoch: 2,
+        ..Default::default()
+    });
+    std::fs::write(
+        dir.path().join("o.toml"),
+        "id = \"o1\"\ntitle = \"t\"\nbrief = \"b\"\nscope = [\"src\"]\nexecutor = \"codex\"\n",
+    )
+    .unwrap();
+    let orders = crate::order::load(&[dir.path().join("o.toml")]).unwrap();
+    let problems = crate::order::validate(&orders, &config);
+    assert!(
+        problems.iter().any(|p| p.contains("revokes executor")),
+        "{problems:?}"
+    );
 }
 
 #[test]

@@ -18,6 +18,8 @@ pub fn resume(
     let run_dir = crate::run::runs_root().join(run_id);
     let replay = crate::run_manifest::replay(&run_dir, run_id, current)?;
     let config = replay.config;
+    enforce_live_policy_floor(current, &config, run_id)?;
+    refuse_live_revocations(current, &replay.orders)?;
     crate::config::selected_profile(replay.selected_profile.as_deref());
     let repo = std::env::current_dir().context("resolving current directory")?;
     let recorded_host = crate::run_manifest::recorded_host_kind(&run_dir)?;
@@ -217,6 +219,66 @@ fn text(record: &serde_json::Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(serde_json::Value::as_str)
         .map(String::from)
+}
+
+/// Live policy is the safety floor; recorded policy authorized the original run.
+fn enforce_live_policy_floor(current: &Config, recorded: &Config, run_id: &str) -> Result<()> {
+    let Some(live_policy) = current.trusted_policy.as_ref() else {
+        return Ok(());
+    };
+    live_policy
+        .verify_signature()
+        .context("live trusted_policy signature check failed on resume")?;
+    let recorded_epoch = recorded
+        .trusted_policy
+        .as_ref()
+        .map(|policy| policy.policy_epoch)
+        .unwrap_or(0);
+    if !live_policy.allows_resume_of(recorded_epoch) {
+        bail!(
+            "run {run_id} was recorded under trusted_policy epoch {recorded_epoch}, but the live policy requires minimum_resumable_epoch {}; re-run under the current policy instead of resume",
+            live_policy.minimum_resumable_epoch
+        );
+    }
+    Ok(())
+}
+
+/// Emergency bans on the live policy apply to residual resume work even when the
+/// recorded policy authorized the original dispatch.
+fn refuse_live_revocations(current: &Config, orders: &[Order]) -> Result<()> {
+    let Some(live) = current.trusted_policy.as_ref() else {
+        return Ok(());
+    };
+    if live.revoked_executors.is_empty() && live.revoked_reviewers.is_empty() {
+        return Ok(());
+    }
+    let mut problems = Vec::new();
+    for order in orders {
+        let executor = order.executor_name(current);
+        if let Some(executor) = executor.as_deref()
+            && live.revoked_executors.iter().any(|name| name == executor)
+        {
+            problems.push(format!(
+                "order {:?}: live trusted policy revokes executor {executor:?}",
+                order.id
+            ));
+        }
+        if let Some(reviewer) = order.reviewer_name(current)
+            && live.revoked_reviewers.iter().any(|name| name == &reviewer)
+        {
+            problems.push(format!(
+                "order {:?}: live trusted policy revokes reviewer {reviewer:?}",
+                order.id
+            ));
+        }
+    }
+    if !problems.is_empty() {
+        bail!(
+            "live trusted policy forbids resuming these orders: {}",
+            problems.join("; ")
+        );
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]

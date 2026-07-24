@@ -64,11 +64,16 @@ Repository content may **request** a profile; it must never **lower** the
 operator’s trusted policy. Policy lives outside the candidate repository.
 
 **Today:** Summoner `[trusted_policy]` is global-only, content-addressed into
-manifest/report/review; not yet signed/revocable epochs.
+manifest/report/review. Identity fields: `policy_id`, `policy_version`,
+`policy_epoch`, `issuer`, `minimum_resumable_epoch`, optional MAC `signature`
+(operator key via `SUMMONER_POLICY_KEY`, domain-separated SHA-256 MAC — not
+public-key crypto), plus `revoked_executors` / `revoked_reviewers`. Resume
+enforces the live epoch floor and re-checks live revocations against residual
+orders. Public-key signatures and tool-digest bans remain open.
 
 **Owner (interim):** Summoner config  
-**Executable tests:** repo cannot publish policy; digest changes with every
-narrowing field
+**Executable tests:** repo cannot publish policy; digest/signature/epoch/revoke
+tests in `config_tests` / `order` tests
 
 ### I3 — Exact input identity
 
