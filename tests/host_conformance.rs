@@ -89,6 +89,71 @@ fn land_ff_targets_exact_sealed_integration_commit() {
 }
 
 #[test]
+fn crucible_gate_failure_blocks_land_ff() {
+    let root = tempdir().unwrap();
+    let repo = root.path().join("repo");
+    let cache = root.path().join("cache");
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // Fake crucible that always fails check.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin.join("crucible");
+        std::fs::write(&path, "#!/bin/sh\necho fail >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        std::fs::write(
+            bin.join("crucible.CMD"),
+            "@echo off\r\necho fail 1>&2\r\nexit /b 1\r\n",
+        )
+        .unwrap();
+    }
+    init(&repo);
+    let a = candidate(&repo, "a", "a.txt", "a\n");
+    let run_id = "2000000000-3";
+    let run_dir = cache.join("summoner").join("runs").join(run_id);
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(
+        run_dir.join("report.json"),
+        serde_json::to_vec_pretty(&json!({
+            "repo": std::fs::canonicalize(&repo).unwrap().display().to_string(),
+            "orders": [{"id": "a", "outcome": "verified", "candidate_commit": a, "after": []}],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let out = Command::new(SUMMONER)
+        .args(["land", run_id])
+        .current_dir(&repo)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("HOME", &cache)
+        .env("PATH", path)
+        .env("SUMMONER_LAND_ALLOW_NO_AGGREGATE", "1")
+        .env("SUMMONER_LAND_CRUCIBLE", "check")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let land: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(land["stopped"]["id"], "_gate");
+    assert!(
+        land["stopped"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("crucible"),
+        "{land}"
+    );
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
+}
+
+#[test]
 fn dirty_misidentified_candidate_is_refused_by_land_when_missing_object() {
     let root = tempdir().unwrap();
     let repo = root.path().join("repo");

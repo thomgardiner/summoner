@@ -185,7 +185,7 @@ fn seal_and_gate(
         .as_str()
         .expect("capture always sets integration_commit")
         .to_string();
-    match aggregate_verify(repo) {
+    match run_integration_gates(repo, base_commit, &sealed) {
         Ok(report) => {
             if let Err(error) = assert_still_at(repo, &sealed) {
                 return (
@@ -213,11 +213,115 @@ fn seal_and_gate(
             None,
             None,
             Some(json!({
-                "id": "_aggregate",
-                "reason": format!("aggregate verify failed: {error:#}"),
+                "id": "_gate",
+                "reason": format!("{error:#}"),
             })),
         ),
     }
+}
+
+/// Aggregate verify, optional Crucible arms, optional holder review — all against I.
+fn run_integration_gates(
+    repo: &Path,
+    base_commit: &str,
+    integration_commit: &str,
+) -> Result<Value> {
+    let mut report = aggregate_verify(repo)?;
+    if let Some(crucible) = crucible_gate(repo, base_commit, integration_commit)? {
+        report["crucible"] = crucible;
+    }
+    if let Some(review) = land_review_gate(repo, base_commit, integration_commit)? {
+        report["holder_review"] = review;
+    }
+    assert_still_at(repo, integration_commit)?;
+    Ok(report)
+}
+
+/// `SUMMONER_LAND_CRUCIBLE=check` or comma arms `check,harden` (requires `crucible` on PATH).
+fn crucible_gate(repo: &Path, base: &str, candidate: &str) -> Result<Option<Value>> {
+    let Ok(raw) = std::env::var("SUMMONER_LAND_CRUCIBLE") else {
+        return Ok(None);
+    };
+    let arms: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if arms.is_empty() {
+        bail!("SUMMONER_LAND_CRUCIBLE is empty");
+    }
+    let bin = std::env::var("SUMMONER_CRUCIBLE_BIN").unwrap_or_else(|_| "crucible".into());
+    let mut results = Vec::new();
+    for arm in arms {
+        let mut cmd = Command::new(&bin);
+        cmd.current_dir(repo);
+        match arm {
+            "check" => {
+                cmd.arg("check");
+            }
+            "harden" => {
+                cmd.args(["harden", "--base", base, "--candidate", candidate]);
+            }
+            "run" => {
+                cmd.arg("run");
+            }
+            other => bail!("unknown SUMMONER_LAND_CRUCIBLE arm {other:?} (check|harden|run)"),
+        }
+        let output = cmd
+            .output()
+            .with_context(|| format!("running {bin} {arm}"))?;
+        let ok = output.status.success();
+        results.push(json!({
+            "arm": arm,
+            "ok": ok,
+            "exit": output.status.code(),
+            "stderr_tail": String::from_utf8_lossy(&output.stderr).chars().rev().take(500).collect::<String>().chars().rev().collect::<String>(),
+        }));
+        if !ok {
+            bail!(
+                "crucible {arm} failed against integration candidate {candidate}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        assert_still_at(repo, candidate)?;
+    }
+    Ok(Some(json!({ "arms": results })))
+}
+
+/// Optional holder review against I: `SUMMONER_LAND_REVIEW` = shell-free argv
+/// (`\x1f`-joined or whitespace). Runs with cwd = repo at I; must exit 0.
+fn land_review_gate(repo: &Path, base: &str, candidate: &str) -> Result<Option<Value>> {
+    let Ok(raw) = std::env::var("SUMMONER_LAND_REVIEW") else {
+        return Ok(None);
+    };
+    let argv: Vec<&str> = if raw.contains('\u{1f}') {
+        raw.split('\u{1f}').filter(|s| !s.is_empty()).collect()
+    } else {
+        raw.split_whitespace().collect()
+    };
+    if argv.is_empty() {
+        bail!("SUMMONER_LAND_REVIEW is empty");
+    }
+    let output = Command::new(argv[0])
+        .args(&argv[1..])
+        .current_dir(repo)
+        .env("SUMMONER_LAND_BASE", base)
+        .env("SUMMONER_LAND_CANDIDATE", candidate)
+        .output()
+        .with_context(|| format!("running land holder review {}", argv[0]))?;
+    if !output.status.success() {
+        bail!(
+            "holder review failed against integration candidate {candidate}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    assert_still_at(repo, candidate)?;
+    Ok(Some(json!({
+        "argv": argv,
+        "ok": true,
+        "base_commit": base,
+        "integration_commit": candidate,
+    })))
 }
 
 fn advance_to_integration(
@@ -352,6 +456,10 @@ fn assert_still_at(repo: &Path, expected: &str) -> Result<()> {
 /// - else `cargo test --locked` when a root `Cargo.toml` exists
 /// - else refuse (no silent no-op). Escape hatch for fixtures:
 ///   `SUMMONER_LAND_ALLOW_NO_AGGREGATE=1`
+///
+/// Additional optional gates (still against I):
+/// - `SUMMONER_LAND_CRUCIBLE=check[,harden][,run]`
+/// - `SUMMONER_LAND_REVIEW` argv for holder review
 fn aggregate_verify(repo: &Path) -> Result<Value> {
     if let Ok(raw) = std::env::var("SUMMONER_LAND_VERIFY") {
         let argv: Vec<&str> = if raw.contains('\u{1f}') {

@@ -215,7 +215,7 @@ fn aggregate_gate_failure_leaves_target_unchanged_and_drops_temp_branch() {
         )
     });
     assert_eq!(output.status.code().unwrap(), 1, "{report}");
-    assert_eq!(report["stopped"]["id"], "_aggregate");
+    assert_eq!(report["stopped"]["id"], "_gate");
     assert!(report["integration_candidate"].is_null());
     assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head_before);
     // No sealed ref for a failed gate.

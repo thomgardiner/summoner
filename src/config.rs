@@ -102,9 +102,10 @@ pub struct TrustedPolicy {
     pub minimum_resumable_epoch: u64,
     /// Authority that published this policy (operator label, not a crypto DN).
     pub issuer: Option<String>,
-    /// Optional hex MAC of the policy body (excluding `signature`) under the
-    /// operator signing key. When `require_signature` is true, verification
-    /// is mandatory. Domain-separated SHA-256 MAC — not a public-key signature.
+    /// Optional authentication of the policy body (excluding this field).
+    /// Formats: 64-char hex MAC (`SUMMONER_POLICY_KEY`) or `ed25519:` + hex
+    /// (`SUMMONER_POLICY_PUBKEY`). When `require_signature` is true, verification
+    /// is mandatory.
     pub signature: Option<String>,
     /// Refuse to load/use the policy when `signature` is missing or invalid.
     pub require_signature: bool,
@@ -202,52 +203,66 @@ impl TrustedPolicy {
 
     /// Domain-separated MAC of the policy body under an operator secret.
     pub fn mac_hex(key: &[u8], body_digest: &str) -> String {
-        use sha2::{Digest, Sha256};
-        use std::fmt::Write;
-        let mut hash = Sha256::new();
-        hash.update(b"summoner.trusted-policy.mac.v1\0");
-        let key_len = (key.len() as u64).to_le_bytes();
-        hash.update(key_len);
-        hash.update(key);
-        hash.update([0]);
-        hash.update(body_digest.as_bytes());
-        let mut hex = String::with_capacity(64);
-        for byte in hash.finalize() {
-            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        hex
+        crate::policy_crypto::mac_hex(key, body_digest)
     }
 
-    /// Verify optional signature against `SUMMONER_POLICY_KEY` (raw secret
-    /// bytes as provided by the environment; not hex-decoded).
-    /// Returns `Ok(None)` when no signature is required or present without a key
-    /// check; `Ok(Some(true/false))` when verification ran; `Err` when required
-    /// and missing/invalid.
+    /// Verify optional signature: ed25519 (`SUMMONER_POLICY_PUBKEY`) or MAC
+    /// (`SUMMONER_POLICY_KEY`). Returns `Ok(None)` when nothing is required or
+    /// present without a key check; `Ok(Some(true/false))` when verification
+    /// ran; `Err` when required and missing/invalid.
     pub fn verify_signature(&self) -> anyhow::Result<Option<bool>> {
-        let key = std::env::var_os("SUMMONER_POLICY_KEY").and_then(|v| {
-            let raw = v.into_string().ok()?;
-            if raw.is_empty() {
-                return None;
-            }
-            Some(raw.into_bytes())
-        });
-        match (&self.signature, self.require_signature, key) {
-            (None, true, _) => {
+        let digest = self.sha256();
+        match &self.signature {
+            None if self.require_signature => {
                 anyhow::bail!("trusted_policy.require_signature is set but signature is missing")
             }
-            (Some(_), true, None) => anyhow::bail!(
-                "trusted_policy.require_signature is set but SUMMONER_POLICY_KEY is unset"
-            ),
-            (Some(sig), require, Some(key)) => {
-                let expected = Self::mac_hex(&key, &self.sha256());
-                let ok = constant_time_eq(sig.as_bytes(), expected.as_bytes());
-                if require && !ok {
-                    anyhow::bail!("trusted_policy signature does not match SUMMONER_POLICY_KEY");
+            None => Ok(None),
+            Some(sig) if crate::policy_crypto::is_ed25519_signature(sig) => {
+                let pubkey = std::env::var_os("SUMMONER_POLICY_PUBKEY").and_then(|v| {
+                    let raw = v.into_string().ok()?;
+                    (!raw.is_empty()).then_some(raw.into_bytes())
+                });
+                match pubkey {
+                    None if self.require_signature => anyhow::bail!(
+                        "trusted_policy has an ed25519 signature but SUMMONER_POLICY_PUBKEY is unset"
+                    ),
+                    None => Ok(None),
+                    Some(pk) => {
+                        let ok = crate::policy_crypto::verify_ed25519(&pk, &digest, sig)?;
+                        if self.require_signature && !ok {
+                            anyhow::bail!(
+                                "trusted_policy ed25519 signature does not match SUMMONER_POLICY_PUBKEY"
+                            );
+                        }
+                        Ok(Some(ok))
+                    }
                 }
-                Ok(Some(ok))
             }
-            (Some(_), false, None) => Ok(None), // recorded but not checked
-            (None, false, _) => Ok(None),
+            Some(sig) => {
+                let key = std::env::var_os("SUMMONER_POLICY_KEY").and_then(|v| {
+                    let raw = v.into_string().ok()?;
+                    (!raw.is_empty()).then_some(raw.into_bytes())
+                });
+                match key {
+                    None if self.require_signature => anyhow::bail!(
+                        "trusted_policy.require_signature is set but SUMMONER_POLICY_KEY is unset"
+                    ),
+                    None => Ok(None),
+                    Some(key) => {
+                        let expected = Self::mac_hex(&key, &digest);
+                        let ok = crate::policy_crypto::constant_time_eq(
+                            sig.as_bytes(),
+                            expected.as_bytes(),
+                        );
+                        if self.require_signature && !ok {
+                            anyhow::bail!(
+                                "trusted_policy signature does not match SUMMONER_POLICY_KEY"
+                            );
+                        }
+                        Ok(Some(ok))
+                    }
+                }
+            }
         }
     }
 
@@ -267,17 +282,6 @@ impl TrustedPolicy {
     pub fn allows_resume_of(&self, recorded_epoch: u64) -> bool {
         recorded_epoch >= self.minimum_resumable_epoch
     }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 /// Authority surfaces Crucible and Summoner judge inputs share. Always protected

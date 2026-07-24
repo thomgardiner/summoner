@@ -70,8 +70,9 @@ manifest/report/review. Identity fields: `policy_id`, `policy_version`,
 public-key crypto), plus `revoked_executors` / `revoked_reviewers`. Resume
 enforces the live epoch floor and re-checks live revocations against residual
 orders. No model recipe is pre-installed: `summoner setup` wizard (session or
-permanent) selects executors. Public-key signatures and tool-digest bans remain
-open.
+permanent) selects executors. Policy auth supports legacy MAC and ed25519
+(`ed25519:` signatures, `SUMMONER_POLICY_PUBKEY` / `summoner policy keygen|sign|verify`).
+Tool-digest bans at dispatch remain open.
 
 **Owner (interim):** Summoner config  
 **Executable tests:** repo cannot publish policy; digest/signature/epoch/revoke
@@ -139,10 +140,10 @@ target advances **specifically to I**.
 
 **Today:** Summoner land merges exact `candidate_commit`s onto a temp branch,
 captures a first-class integration candidate `I` (commit + tree + ordered
-components + content-addressed `integration_id`), retains it under
-`refs/summoner/integration/<run>`, runs the aggregate gate, re-checks that HEAD
-still equals `I`, and fast-forwards the protected tip **specifically to that
-commit**. Full Crucible/holder review envelopes against `I` remain open.
+components + content-addressed `integration_id`), runs aggregate verify plus
+optional `SUMMONER_LAND_CRUCIBLE` arms and `SUMMONER_LAND_REVIEW` holder argv
+against `I`, retains the ref only after gates pass, re-checks HEAD equals `I`,
+and fast-forwards the protected tip **specifically to that commit**.
 
 **Owner (interim):** Summoner land  
 **Executable tests:** conflict leaves target unchanged; no-op aggregate refused

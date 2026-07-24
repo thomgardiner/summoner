@@ -206,6 +206,32 @@ reports.
 Stack invariants for Grove · Summoner · Crucible: [ASSURANCE.md](ASSURANCE.md)
 (epoch 1). Features that violate an invariant are bugs, not tradeoffs.
 
+Policy auth (optional):
+
+```sh
+summoner policy keygen                          # ed25519 seed + public key
+export SUMMONER_POLICY_SIGNING_KEY=…            # seed hex
+export SUMMONER_POLICY_PUBKEY=…                 # public hex
+summoner policy sign                            # prints signature for global config
+summoner policy verify
+```
+
+Land against integration candidate `I` may also run:
+
+```sh
+export SUMMONER_LAND_CRUCIBLE=check             # or check,harden
+export SUMMONER_LAND_REVIEW='my-reviewer …'     # must exit 0
+summoner land
+```
+
+Impact vs a recorded baseline (descriptive deltas only):
+
+```sh
+summoner impact --write-baseline ./baseline.json
+# … fleets over time …
+summoner impact --baseline ./baseline.json
+```
+
 ## License
 
 MIT

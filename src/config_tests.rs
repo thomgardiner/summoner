@@ -215,6 +215,31 @@ fn policy_signature_is_excluded_from_digest_and_verifies_with_key() {
 }
 
 #[test]
+fn policy_ed25519_signature_verifies_with_pubkey() {
+    let mut policy = crate::config::TrustedPolicy {
+        policy_id: Some("org".into()),
+        policy_epoch: 9,
+        require_signature: true,
+        ..Default::default()
+    };
+    let digest = policy.sha256();
+    let (seed, pubkey) = crate::policy_crypto::generate_keypair().unwrap();
+    let sig = crate::policy_crypto::sign_ed25519(seed.as_bytes(), &digest).unwrap();
+    policy.signature = Some(sig);
+    assert_eq!(policy.sha256(), digest);
+    unsafe {
+        std::env::set_var("SUMMONER_POLICY_PUBKEY", &pubkey);
+        std::env::remove_var("SUMMONER_POLICY_KEY");
+    }
+    assert_eq!(policy.verify_signature().unwrap(), Some(true));
+    unsafe { std::env::set_var("SUMMONER_POLICY_PUBKEY", "00".repeat(32)) };
+    assert!(
+        policy.verify_signature().is_err() || policy.verify_signature().unwrap() == Some(false)
+    );
+    unsafe { std::env::remove_var("SUMMONER_POLICY_PUBKEY") };
+}
+
+#[test]
 fn resume_floor_rejects_older_epochs() {
     let live = crate::config::TrustedPolicy {
         policy_epoch: 10,

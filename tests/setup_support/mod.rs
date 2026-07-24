@@ -105,7 +105,8 @@ exit /b 1"#,
             fake(
                 &self.bin,
                 name,
-                r#"echo "$@" >> "$FAKE_MODEL_LOG"
+                // Health probes (`login status`, etc.) must never hang.
+                r#"echo "$@" >> "${FAKE_MODEL_LOG:-/dev/null}"
 exit 0"#,
                 r#"echo %*>>"%FAKE_MODEL_LOG%"
 exit /b 0"#,

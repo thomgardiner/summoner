@@ -10,6 +10,7 @@ mod executor;
 mod gate;
 mod grove;
 mod host;
+mod impact;
 mod init;
 mod integration;
 mod land;
@@ -19,6 +20,7 @@ mod order;
 mod outcome;
 mod overview;
 mod plan;
+mod policy_crypto;
 mod presets;
 mod report;
 mod review;
@@ -38,7 +40,7 @@ mod tripwires;
 mod watch;
 mod wizard;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -161,10 +163,39 @@ enum Cmd {
         #[arg(long)]
         repo: Option<String>,
     },
+    /// Delivery economics vs a baseline scorecard snapshot (honest deltas only).
+    Impact {
+        /// Baseline JSON from a previous `summoner impact --write-baseline PATH`.
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        /// Write current aggregate as a baseline snapshot.
+        #[arg(long)]
+        write_baseline: Option<PathBuf>,
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Sign or verify trusted_policy authentication (MAC or ed25519).
+    Policy {
+        #[command(subcommand)]
+        action: PolicyCmd,
+    },
     /// Print Summoner-owned Grove tasks.
     Status,
     /// Check Grove, repository identity, selected roles, and optional orders.
     Doctor { paths: Vec<PathBuf> },
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Generate an ed25519 seed + public key pair (hex).
+    Keygen,
+    /// Sign the live global trusted_policy body digest.
+    ///
+    /// Uses `SUMMONER_POLICY_SIGNING_KEY` (ed25519 seed hex) or
+    /// `SUMMONER_POLICY_KEY` (legacy MAC secret).
+    Sign,
+    /// Verify the live global trusted_policy signature.
+    Verify,
 }
 
 fn main() {
@@ -266,9 +297,86 @@ fn dispatch() -> Result<i32> {
         Cmd::Land { run_id, dry_run } => land::land(run_id, dry_run),
         Cmd::Overview { watch } => overview::overview(&resolved()?.config.grove_bin(), watch),
         Cmd::Scorecard { repo } => scorecard::scorecard(repo),
+        Cmd::Impact {
+            baseline,
+            write_baseline,
+            repo,
+        } => impact::run(
+            repo.as_deref(),
+            baseline.as_deref(),
+            write_baseline.as_deref(),
+        ),
+        Cmd::Policy { action } => policy_cmd(action),
         Cmd::Status => status(&resolved()?.config),
         Cmd::Doctor { paths } => doctor::run(&resolved()?.config, &paths, cli.allow_unknown_auth),
     }
+}
+
+fn policy_cmd(action: PolicyCmd) -> Result<i32> {
+    match action {
+        PolicyCmd::Keygen => {
+            let (seed, pubkey) = policy_crypto::generate_keypair()?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "scheme": "ed25519",
+                    "signing_seed_hex": seed,
+                    "public_key_hex": pubkey,
+                    "env": {
+                        "SUMMONER_POLICY_SIGNING_KEY": seed,
+                        "SUMMONER_POLICY_PUBKEY": pubkey,
+                    },
+                    "note": "store the seed privately; publish only the public key"
+                })
+            );
+            Ok(0)
+        }
+        PolicyCmd::Sign => {
+            let policy = resolved_policy()?;
+            let digest = policy.sha256();
+            let signature = if let Ok(seed) = std::env::var("SUMMONER_POLICY_SIGNING_KEY") {
+                policy_crypto::sign_ed25519(seed.as_bytes(), &digest)?
+            } else if let Ok(key) = std::env::var("SUMMONER_POLICY_KEY") {
+                config::TrustedPolicy::mac_hex(key.as_bytes(), &digest)
+            } else {
+                anyhow::bail!(
+                    "set SUMMONER_POLICY_SIGNING_KEY (ed25519 seed hex) or SUMMONER_POLICY_KEY (MAC secret)"
+                );
+            };
+            println!(
+                "{}",
+                serde_json::json!({
+                    "policy_sha256": digest,
+                    "signature": signature,
+                    "hint": "paste signature into [trusted_policy].signature in global config"
+                })
+            );
+            Ok(0)
+        }
+        PolicyCmd::Verify => {
+            let policy = resolved_policy()?;
+            let valid = policy.verify_signature()?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "policy_sha256": policy.sha256(),
+                    "signature_present": policy.signature.is_some(),
+                    "signature_valid": valid,
+                    "identity": policy.identity(valid),
+                })
+            );
+            Ok(if valid == Some(false) { 1 } else { 0 })
+        }
+    }
+}
+
+fn resolved_policy() -> Result<config::TrustedPolicy> {
+    let resolved = config::load()?;
+    resolved
+        .config
+        .trusted_policy
+        .clone()
+        .context("no [trusted_policy] in resolved config; set it in the personal global config")
 }
 
 fn initialize(
