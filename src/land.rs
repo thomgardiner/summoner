@@ -3,10 +3,12 @@
 //!
 //! Landing is not an auto-merge of branch tips. It merges the exact
 //! `candidate_commit` each report recorded (the reviewed commit) onto a
-//! temporary integration branch, runs an optional aggregate verify gate, and
-//! only then fast-forwards the protected target. A non-green order and
-//! everything downstream of it are set aside. The first conflict aborts the
-//! integration branch without advancing the target.
+//! temporary integration branch, captures an immutable integration candidate
+//! `I` (commit + tree + component list), runs the aggregate verify gate against
+//! that tree, re-checks that `I` has not moved, and only then fast-forwards the
+//! protected target **to that exact commit**. A non-green order and everything
+//! downstream of it are set aside. The first conflict aborts without advancing
+//! the target.
 
 use crate::report::is_green_outcome;
 use anyhow::{Context, Result, bail};
@@ -37,42 +39,16 @@ pub fn land(run_id: Option<String>, dry_run: bool) -> Result<i32> {
         Some(id) => root.join(id),
         None => latest_finished_run(&root)?,
     };
-    let report_path = run_dir.join("report.json");
-    let report: Value = serde_json::from_slice(
-        &std::fs::read(&report_path)
-            .with_context(|| format!("reading {}", report_path.display()))?,
-    )
-    .with_context(|| format!("parsing {}", report_path.display()))?;
-
-    let repo = report["repo"]
-        .as_str()
-        .context("report.json has no repo")?
-        .to_string();
-    // Land into the repository the run targeted, and only from there: the
-    // candidate commits live in that repository's object database.
-    let here = git(Path::new("."), &["rev-parse", "--show-toplevel"])
-        .context("summoner land must run inside a git repository")?;
-    if canonical(&here) != canonical(&repo) {
-        bail!("this run targeted {repo}, but you are in {here}; run `summoner land` there");
-    }
-    let repo = PathBuf::from(&repo);
-
-    let candidates = candidates(&report)?;
-    let plan = plan_landing(candidates);
+    let (repo, plan) = load_landing_context(&run_dir)?;
 
     if plan.order.is_empty() {
-        report_result(&repo, &plan, &[], None, None, dry_run)?;
-        // Nothing to land is a clean no-op, not a failure.
+        report_result(&repo, &plan, &[], None, None, None, dry_run)?;
         return Ok(0);
     }
-
     if dry_run {
-        report_result(&repo, &plan, &[], None, None, true)?;
+        report_result(&repo, &plan, &[], None, None, None, true)?;
         return Ok(0);
     }
-
-    // Refuse to merge into work in progress: a dirty tree makes an aborted merge
-    // impossible to reason about.
     if !git(&repo, &["status", "--porcelain"])?.is_empty() {
         bail!("working tree is not clean; commit or stash before landing");
     }
@@ -89,62 +65,285 @@ pub fn land(run_id: Option<String>, dry_run: bool) -> Result<i32> {
         run_slug,
         target_head.chars().take(8).collect::<String>()
     );
-    // Create the integration branch from the protected tip and switch to it.
     git(&repo, &["checkout", "-B", &integration, &target_head])?;
 
-    let mut landed: Vec<Value> = Vec::new();
-    let mut stopped: Option<Value> = None;
-    for candidate in &plan.order {
-        let commit = candidate.commit.as_deref().expect("landable has a commit");
-        if git(&repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_err() {
-            stopped = Some(json!({
-                "id": candidate.id,
-                "reason": format!("candidate commit {commit} is missing from the repository"),
-            }));
-            break;
-        }
-        match merge(&repo, &candidate.id, commit) {
-            Ok(mode) => landed.push(json!({"id": candidate.id, "commit": commit, "mode": mode})),
-            Err(conflict) => {
-                let _ = git(&repo, &["merge", "--abort"]);
-                stopped = Some(json!({"id": candidate.id, "commit": commit, "reason": conflict}));
-                break;
-            }
-        }
-    }
-
-    let mut aggregate: Option<Value> = None;
+    let (landed, mut stopped) = merge_candidates(&repo, &plan.order);
+    let (aggregate, integration_candidate, seal_stop) =
+        seal_and_gate(&repo, run_slug, &target_head, &landed, stopped.is_none());
     if stopped.is_none() {
-        match aggregate_verify(&repo) {
-            Ok(report) => aggregate = Some(report),
-            Err(error) => {
-                stopped = Some(json!({
-                    "id": "_aggregate",
-                    "reason": format!("aggregate verify failed: {error:#}"),
-                }));
-            }
-        }
+        stopped = seal_stop;
     }
 
     if stopped.is_some() {
-        // Leave the integration branch for inspection; do not advance the target.
-        git(&repo, &["checkout", &target_branch])?;
-        report_result(&repo, &plan, &landed, stopped, aggregate, false)?;
+        // Drop the temp integration branch; leave only retained refs for sealed I.
+        abandon_integration(&repo, &target_branch, &integration);
+        report_result(
+            &repo,
+            &plan,
+            &landed,
+            stopped,
+            aggregate,
+            integration_candidate,
+            false,
+        )?;
         return Ok(1);
     }
 
-    // Advance the protected target only after the integrated state is clean.
-    let integrated = git(&repo, &["rev-parse", "HEAD"])?;
-    git(&repo, &["checkout", &target_branch])?;
-    git(&repo, &["merge", "--ff-only", &integrated])
-        .context("fast-forwarding the target branch onto the integration result")?;
-    let _ = Command::new("git")
-        .args(["branch", "-D", &integration])
-        .current_dir(&repo)
-        .output();
-
-    report_result(&repo, &plan, &landed, None, aggregate, false)?;
+    advance_to_integration(
+        &repo,
+        &target_branch,
+        &integration,
+        integration_candidate
+            .as_ref()
+            .context("integration candidate missing after a successful gate")?,
+    )?;
+    report_result(
+        &repo,
+        &plan,
+        &landed,
+        None,
+        aggregate,
+        integration_candidate,
+        false,
+    )?;
     Ok(0)
+}
+
+fn load_landing_context(run_dir: &Path) -> Result<(PathBuf, Plan)> {
+    let report_path = run_dir.join("report.json");
+    let report: Value = serde_json::from_slice(
+        &std::fs::read(&report_path)
+            .with_context(|| format!("reading {}", report_path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", report_path.display()))?;
+    let repo = report["repo"]
+        .as_str()
+        .context("report.json has no repo")?
+        .to_string();
+    let here = git(Path::new("."), &["rev-parse", "--show-toplevel"])
+        .context("summoner land must run inside a git repository")?;
+    if canonical(&here) != canonical(&repo) {
+        bail!("this run targeted {repo}, but you are in {here}; run `summoner land` there");
+    }
+    let repo = PathBuf::from(&repo);
+    let plan = plan_landing(candidates(&report)?);
+    Ok((repo, plan))
+}
+
+fn merge_candidates(repo: &Path, order: &[Candidate]) -> (Vec<Value>, Option<Value>) {
+    let mut landed = Vec::new();
+    for candidate in order {
+        let commit = candidate.commit.as_deref().expect("landable has a commit");
+        if git(repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_err() {
+            return (
+                landed,
+                Some(json!({
+                    "id": candidate.id,
+                    "reason": format!("candidate commit {commit} is missing from the repository"),
+                })),
+            );
+        }
+        match merge(repo, &candidate.id, commit) {
+            Ok(mode) => landed.push(json!({"id": candidate.id, "commit": commit, "mode": mode})),
+            Err(conflict) => {
+                let _ = git(repo, &["merge", "--abort"]);
+                return (
+                    landed,
+                    Some(json!({"id": candidate.id, "commit": commit, "reason": conflict})),
+                );
+            }
+        }
+    }
+    (landed, None)
+}
+
+fn seal_and_gate(
+    repo: &Path,
+    run_slug: &str,
+    base_commit: &str,
+    landed: &[Value],
+    proceed: bool,
+) -> (Option<Value>, Option<Value>, Option<Value>) {
+    if !proceed {
+        return (None, None, None);
+    }
+    // Capture I without retaining yet — only a gate-passing candidate is retained.
+    let mut captured = match capture_integration(repo, run_slug, base_commit, landed) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                None,
+                None,
+                Some(json!({
+                    "id": "_integration",
+                    "reason": format!("failed to capture integration candidate: {error:#}"),
+                })),
+            );
+        }
+    };
+    let sealed = captured["integration_commit"]
+        .as_str()
+        .expect("capture always sets integration_commit")
+        .to_string();
+    match aggregate_verify(repo) {
+        Ok(report) => {
+            if let Err(error) = assert_still_at(repo, &sealed) {
+                return (
+                    None,
+                    None,
+                    Some(json!({
+                        "id": "_integration",
+                        "reason": format!("{error:#}"),
+                    })),
+                );
+            }
+            if let Err(error) = retain_integration(repo, &mut captured) {
+                return (
+                    None,
+                    None,
+                    Some(json!({
+                        "id": "_integration",
+                        "reason": format!("{error:#}"),
+                    })),
+                );
+            }
+            (Some(report), Some(captured), None)
+        }
+        Err(error) => (
+            None,
+            None,
+            Some(json!({
+                "id": "_aggregate",
+                "reason": format!("aggregate verify failed: {error:#}"),
+            })),
+        ),
+    }
+}
+
+fn advance_to_integration(
+    repo: &Path,
+    target_branch: &str,
+    integration_branch: &str,
+    integration_candidate: &Value,
+) -> Result<()> {
+    let integrated = integration_candidate["integration_commit"]
+        .as_str()
+        .context("integration candidate missing commit")?
+        .to_string();
+    assert_still_at(repo, &integrated)?;
+    git(repo, &["checkout", target_branch])?;
+    git(repo, &["merge", "--ff-only", &integrated])
+        .context("fast-forwarding the target branch onto the sealed integration candidate")?;
+    let tip = git(repo, &["rev-parse", "HEAD"])?;
+    if tip != integrated {
+        bail!("target HEAD {tip} is not the sealed integration candidate {integrated}");
+    }
+    let _ = Command::new("git")
+        .args(["branch", "-D", integration_branch])
+        .current_dir(repo)
+        .output();
+    Ok(())
+}
+
+/// Capture the post-merge integration candidate without retaining it yet
+/// (ASSURANCE I7). Retention happens only after the aggregate gate passes.
+fn capture_integration(
+    repo: &Path,
+    run_slug: &str,
+    base_commit: &str,
+    landed: &[Value],
+) -> Result<Value> {
+    if !git(repo, &["status", "--porcelain"])?.is_empty() {
+        bail!("integration tree is dirty after merges; refusing to seal I");
+    }
+    let integration_commit = git(repo, &["rev-parse", "HEAD"])?;
+    let integration_tree = git(repo, &["rev-parse", "HEAD^{tree}"])?;
+    let components: Vec<Value> = landed
+        .iter()
+        .map(|entry| {
+            json!({
+                "id": entry["id"],
+                "commit": entry["commit"],
+            })
+        })
+        .collect();
+    // Content-addressed id over base + I + ordered components (stable across recapture).
+    let identity = {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+        let mut hash = Sha256::new();
+        hash.update(b"summoner.integration-candidate.v1\0");
+        hash.update(base_commit.as_bytes());
+        hash.update([0]);
+        hash.update(integration_commit.as_bytes());
+        hash.update([0]);
+        hash.update(integration_tree.as_bytes());
+        hash.update([0]);
+        for entry in landed {
+            if let (Some(id), Some(commit)) = (entry["id"].as_str(), entry["commit"].as_str()) {
+                hash.update(id.as_bytes());
+                hash.update([0]);
+                hash.update(commit.as_bytes());
+                hash.update([0]);
+            }
+        }
+        let mut hex = String::with_capacity(64);
+        for byte in hash.finalize() {
+            write!(&mut hex, "{byte:02x}").expect("writing to String");
+        }
+        hex
+    };
+    let retained_ref = format!("refs/summoner/integration/{run_slug}");
+    Ok(json!({
+        "schema_version": 1,
+        "integration_id": identity,
+        "run_id": run_slug,
+        "base_commit": base_commit,
+        "integration_commit": integration_commit,
+        "integration_tree": integration_tree,
+        "components": components,
+        "retained_ref": retained_ref,
+    }))
+}
+
+/// Retain I under `refs/summoner/integration/<run>` only after the gate passes.
+/// Refuse to overwrite a different previously sealed I for the same run.
+fn retain_integration(repo: &Path, captured: &mut Value) -> Result<()> {
+    let retained_ref = captured["retained_ref"]
+        .as_str()
+        .context("integration candidate missing retained_ref")?
+        .to_string();
+    let commit = captured["integration_commit"]
+        .as_str()
+        .context("integration candidate missing commit")?
+        .to_string();
+    match git(repo, &["rev-parse", "--verify", &retained_ref]) {
+        Ok(existing) if existing == commit => Ok(()),
+        Ok(existing) => bail!(
+            "integration ref {retained_ref} already seals {existing}; refusing to overwrite with {commit}"
+        ),
+        Err(_) => {
+            git(repo, &["update-ref", &retained_ref, &commit])
+                .with_context(|| format!("retaining integration candidate under {retained_ref}"))?;
+            Ok(())
+        }
+    }
+}
+
+fn abandon_integration(repo: &Path, target_branch: &str, integration_branch: &str) {
+    let _ = git(repo, &["checkout", target_branch]);
+    let _ = Command::new("git")
+        .args(["branch", "-D", integration_branch])
+        .current_dir(repo)
+        .output();
+}
+
+fn assert_still_at(repo: &Path, expected: &str) -> Result<()> {
+    let head = git(repo, &["rev-parse", "HEAD"])?;
+    if head != expected {
+        bail!("integration candidate drifted during gating: expected {expected}, HEAD is {head}");
+    }
+    Ok(())
 }
 
 /// Post-integration gate before the protected target is advanced.
@@ -350,6 +549,7 @@ fn report_result(
     landed: &[Value],
     stopped: Option<Value>,
     aggregate: Option<Value>,
+    integration_candidate: Option<Value>,
     dry_run: bool,
 ) -> Result<()> {
     let head = git(repo, &["rev-parse", "HEAD"]).unwrap_or_default();
@@ -370,6 +570,7 @@ fn report_result(
             "skipped": skipped,
             "stopped": stopped,
             "aggregate": aggregate,
+            "integration_candidate": integration_candidate,
         }))?
     );
     Ok(())

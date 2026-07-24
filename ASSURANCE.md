@@ -135,9 +135,12 @@ immutable integration candidate `I = deterministic_merge(C1…Cn)`. Aggregate
 verification, Crucible, and holder review must run against **I**; the protected
 target advances **specifically to I**.
 
-**Today:** Summoner land uses a temp integration branch, optional aggregate
-verify, then FF. Integration is not yet a first-class captured candidate object
-with its own full evidence envelope.
+**Today:** Summoner land merges exact `candidate_commit`s onto a temp branch,
+captures a first-class integration candidate `I` (commit + tree + ordered
+components + content-addressed `integration_id`), retains it under
+`refs/summoner/integration/<run>`, runs the aggregate gate, re-checks that HEAD
+still equals `I`, and fast-forwards the protected tip **specifically to that
+commit**. Full Crucible/holder review envelopes against `I` remain open.
 
 **Owner (interim):** Summoner land  
 **Executable tests:** conflict leaves target unchanged; no-op aggregate refused
@@ -245,7 +248,7 @@ Next leap: **stronger proof**, not more autonomy.
 | I4 | `gate.rs` required_profiles; planned: per-profile receipt schema tests |
 | I5 | `fault_injection` dirty verify; Grove `source_changed` |
 | I6 | review integrity; planned: review mutation suite |
-| I7 | `tests/land.rs` conflict/FF; planned: integration candidate object |
+| I7 | `tests/land.rs` conflict/FF + sealed integration candidate |
 | I8 | host policy refuse; planned: capability matrix table tests |
 | I9 | fleet resume / recovery integration tests |
 | I10 | anti_reward completed-vs-verified |

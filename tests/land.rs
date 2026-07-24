@@ -108,6 +108,7 @@ fn land_merges_verified_candidates_in_dependency_order() {
         ]),
     );
 
+    let head_before = git(&repo, &["rev-parse", "HEAD"]);
     let (code, report) = land(&repo, &cache, &run_id, &[]);
     assert_eq!(code, 0, "clean landing exits 0: {report}");
     let landed: Vec<&str> = report["landed"]
@@ -129,6 +130,22 @@ fn land_merges_verified_candidates_in_dependency_order() {
         "a linear chain fast-forwards"
     );
     assert!(git(&repo, &["status", "--porcelain"]).is_empty());
+
+    // Sealed integration candidate I is exact, retained, and matches HEAD.
+    let i = &report["integration_candidate"];
+    assert_eq!(i["schema_version"], 1);
+    assert_eq!(i["integration_commit"], b);
+    assert_eq!(i["base_commit"], head_before);
+    assert_eq!(i["components"][0]["id"], "a");
+    assert_eq!(i["components"][0]["commit"], a);
+    assert_eq!(i["components"][1]["id"], "b");
+    assert_eq!(i["components"][1]["commit"], b);
+    let retained = i["retained_ref"].as_str().unwrap();
+    assert_eq!(git(&repo, &["rev-parse", retained]), b);
+    assert_eq!(report["head"], b);
+    // GC must not drop the sealed integration commit.
+    git(&repo, &["gc", "--prune=now"]);
+    assert_eq!(git(&repo, &["cat-file", "-t", b.as_str()]), "commit");
 }
 
 #[test]
@@ -164,6 +181,56 @@ fn land_stops_at_the_first_conflict_leaving_a_clean_tree() {
     assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head_before);
     assert_eq!(std::fs::read_to_string(repo.join("x.txt")).unwrap(), "0\n");
     assert!(git(&repo, &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn aggregate_gate_failure_leaves_target_unchanged_and_drops_temp_branch() {
+    let base = tempdir().unwrap();
+    let repo = base.path().join("repo");
+    let cache = base.path().join("cache");
+    init(&repo);
+    let a = candidate(&repo, "a", "main", "a.txt", "a\n");
+    let run_id = stage_run(
+        &cache,
+        &repo,
+        json!([{"id": "a", "outcome": "verified", "candidate_commit": a, "after": []}]),
+    );
+    let head_before = git(&repo, &["rev-parse", "HEAD"]);
+
+    // Force a failing aggregate gate (no ALLOW_NO_AGGREGATE).
+    let output = Command::new(SUMMONER)
+        .args(["land", &run_id])
+        .current_dir(&repo)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("HOME", &cache)
+        .env("SUMMONER_LAND_VERIFY", "false")
+        .env_remove("SUMMONER_LAND_ALLOW_NO_AGGREGATE")
+        .output()
+        .expect("run summoner land");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(output.status.code().unwrap(), 1, "{report}");
+    assert_eq!(report["stopped"]["id"], "_aggregate");
+    assert!(report["integration_candidate"].is_null());
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head_before);
+    // No sealed ref for a failed gate.
+    let sealed = Command::new("git")
+        .args(["rev-parse", &format!("refs/summoner/integration/{run_id}")])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(!sealed.status.success());
+    // Temp integration branch cleaned up.
+    let branches = git(&repo, &["branch"]);
+    assert!(
+        !branches.contains("smn/land-integration"),
+        "leaked integration branch: {branches}"
+    );
 }
 
 #[test]
