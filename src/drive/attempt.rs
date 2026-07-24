@@ -1,9 +1,6 @@
-//! The per-order state machine: acquire a worktree, begin the task, then run
-//! the attempt loop — exec, tripwires, verify, review, finish. A rejected or
-//! unverified attempt re-dispatches with its failure evidence up to `revise`
-//! extra times; every other outcome exits on the first pass. Every arm
-//! converges on `outcome::finalize`, so claims and worktrees never leak.
+//! Per-order run state machine methods.
 
+use super::Flow;
 use crate::executor::{self, ExecOutcome, ExecRequest};
 use crate::gate::{ReviewDecision, finish_task, profile_verify, review_gate};
 use crate::grove::BeginOutcome;
@@ -12,93 +9,17 @@ use crate::outcome::{
     claude_cache_split, finalize, git, head_and_tail, kill_recorded_group, number_after, release,
     token_after,
 };
-use crate::report::{OrderReport, Outcome, WorkerFailure};
+use crate::report::{OrderReport, Outcome};
 use crate::run::{Ctx, SHUTDOWN};
 use crate::tripwires;
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-pub(crate) fn run_order(ctx: &Ctx, order: &Order) -> OrderReport {
-    let executor_name = order
-        .executor_name(ctx.config)
-        .expect("validated before dispatch");
-    let mut report = OrderReport::new(order, executor_name.clone());
-    if let Some(prior) = ctx.prior.iter().find(|prior| prior.id == order.id) {
-        report.attempts = prior.attempts.saturating_add(1);
-        report.session_id = prior.session_id.clone();
-        report.usage_tokens = prior.usage_tokens;
-    }
-    let total = Instant::now();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        drive(ctx, order, &executor_name, &mut report)
-    })) {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => fail(ctx, order, &mut report, format!("{error:#}"), None),
-        Err(payload) => {
-            let failure = WorkerFailure::panic(payload);
-            let detail = format!("worker panicked: {}", failure.message);
-            fail(ctx, order, &mut report, detail, Some(failure));
-        }
-    }
-    report.timing.total_secs = total.elapsed().as_secs();
-    report
-}
+use super::revise::{parse_worker_result, revise, revision_feedback, revision_viable};
 
-fn fail(
-    ctx: &Ctx<'_>,
-    order: &Order,
-    report: &mut OrderReport,
-    detail: String,
-    failure: Option<WorkerFailure>,
-) {
-    report.outcome = Outcome::Error;
-    report.detail = Some(detail);
-    report.worker_failure = failure;
-    let abandon = report
-        .worker_failure
-        .as_ref()
-        .map_or("summoner: internal error", |_| "summoner: worker panicked");
-    match (report.task_id.clone(), report.worktree.clone()) {
-        (Some(task_id), Some(worktree)) => finalize(
-            ctx,
-            order,
-            &task_id,
-            Path::new(&worktree),
-            report,
-            Some(abandon),
-        ),
-        (None, Some(worktree)) => release(ctx, Path::new(&worktree), report),
-        _ => {}
-    }
-}
-
-/// Sets `report.outcome` on every path; returns Err only for summoner-side
-/// failures that map to `error`.
-fn drive(ctx: &Ctx, order: &Order, executor_name: &str, report: &mut OrderReport) -> Result<()> {
-    ctx.events.emit(
-        "order_started",
-        serde_json::json!({"id": order.id, "executor": executor_name}),
-    )?;
-    let Some(mut run) = OrderRun::begin(ctx, order, executor_name, report)? else {
-        return Ok(());
-    };
-    loop {
-        if let Flow::Done = run.attempt(report)? {
-            return Ok(());
-        }
-    }
-}
-
-enum Flow {
-    /// The order reached a terminal outcome; finalize already ran.
-    Done,
-    /// A revision was scheduled; run another attempt.
-    Retry,
-}
-
-struct OrderRun<'a> {
+pub(crate) struct OrderRun<'a> {
     ctx: &'a Ctx<'a>,
     order: &'a Order,
     backend: &'a crate::config::ExecutorBackend,
@@ -116,7 +37,7 @@ struct OrderRun<'a> {
 impl<'a> OrderRun<'a> {
     /// Acquire the worktree and begin the task. `None` means the order is
     /// already terminal (blocked on a claim conflict).
-    fn begin(
+    pub(crate) fn begin(
         ctx: &'a Ctx<'a>,
         order: &'a Order,
         executor_name: &str,
@@ -207,7 +128,7 @@ impl<'a> OrderRun<'a> {
 
     /// One full attempt. Terminal outcomes finalize and return `Done`;
     /// a scheduled revision returns `Retry`.
-    fn attempt(&mut self, report: &mut OrderReport) -> Result<Flow> {
+    pub(crate) fn attempt(&mut self, report: &mut OrderReport) -> Result<Flow> {
         let attempt = report.attempts;
         let prefix = if attempt == 1 {
             String::new()
@@ -619,200 +540,5 @@ impl<'a> OrderRun<'a> {
             abandon,
         );
         Ok(Flow::Done)
-    }
-}
-
-/// Whether this failed attempt earns another try, and why the revision is
-/// happening. Denials that matter get recorded on the report.
-fn revision_viable(
-    ctx: &Ctx,
-    order: &Order,
-    report: &mut OrderReport,
-    max_attempts: u64,
-) -> Option<&'static str> {
-    let note = |report: &mut OrderReport, text: &str| {
-        report.detail = Some(match report.detail.take() {
-            Some(detail) => format!("{detail}; {text}"),
-            None => text.to_string(),
-        });
-    };
-    if report.attempts >= max_attempts {
-        return None;
-    }
-    if SHUTDOWN.load(Ordering::SeqCst) {
-        note(report, "shutdown before the revision could dispatch");
-        return None;
-    }
-    // A cap means "spend no more once reached", so equality blocks too.
-    if let (Some(cap), Some(used)) = (order.max_tokens, report.usage_tokens)
-        && used >= cap
-    {
-        note(
-            report,
-            &format!("order token budget reached ({used} of {cap}) — not revised"),
-        );
-        return None;
-    }
-    if let Some(budget) = ctx.config.run_token_budget() {
-        let spent = ctx.spent.load(Ordering::SeqCst);
-        if spent >= budget {
-            note(
-                report,
-                &format!("run token budget exhausted ({spent} of {budget}) — not revised"),
-            );
-            return None;
-        }
-    }
-    Some(match report.outcome {
-        Outcome::Rejected => "rejected",
-        _ => "unverified",
-    })
-}
-
-/// The evidence the next attempt must address: reviewer findings when the
-/// gate rejected, the verification failure otherwise.
-fn revision_feedback(report: &OrderReport) -> String {
-    if let Some(review) = &report.review
-        && review.verdict == "reject"
-    {
-        format!(
-            "Reviewer findings:\n{}",
-            serde_json::to_string_pretty(&review.findings).unwrap_or_default()
-        )
-    } else {
-        format!(
-            "Verification failure: {}",
-            report.detail.as_deref().unwrap_or("unspecified")
-        )
-    }
-}
-
-/// Reset the report to a clean slate for the next attempt. Everything an
-/// attempt produced is cleared — a second attempt failing before review must
-/// not report the first attempt's verdict, and a later reviewer must not see
-/// receipts from a superseded attempt. (Callers compute the revision
-/// feedback from this state BEFORE calling.)
-fn revise(
-    ctx: &Ctx,
-    order: &Order,
-    order_dir: &Path,
-    report: &mut OrderReport,
-    reason: &str,
-) -> Result<()> {
-    report.attempts += 1;
-    report.detail = None;
-    report.finish = None;
-    report.review = None;
-    report.verify.clear();
-    report.tripwires.clear();
-    report.executor_exit = None;
-    let prefix = format!("r{}-", report.attempts);
-    ctx.events.emit(
-        "order_revised",
-        serde_json::json!({
-            "id": order.id,
-            "attempt": report.attempts,
-            "reason": reason,
-            "task_id": report.task_id,
-            // The next attempt's logs, so a live consumer can keep tailing.
-            "stdout_log": order_dir.join(format!("{prefix}stdout.log")).display().to_string(),
-            "stderr_log": order_dir.join(format!("{prefix}stderr.log")).display().to_string(),
-        }),
-    )
-}
-
-const WORKER_RESULT_WINDOW: usize = 10;
-
-fn parse_worker_result(output: &str) -> Option<Result<(), String>> {
-    for line in output
-        .lines()
-        .rev()
-        .filter(|line| !line.trim().is_empty())
-        .take(WORKER_RESULT_WINDOW)
-    {
-        let line = line.trim();
-        if !line.starts_with('{') {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(status) = value.get("summoner_status") else {
-            continue;
-        };
-        let Some(status) = status.as_str() else {
-            return Some(Err(
-                "executor emitted a malformed summoner completion result".into(),
-            ));
-        };
-        let Some(unmet) = value.get("unmet").and_then(serde_json::Value::as_array) else {
-            return Some(Err(
-                "executor completion result is missing an unmet list".into()
-            ));
-        };
-        let Some(unmet) = unmet
-            .iter()
-            .map(serde_json::Value::as_str)
-            .collect::<Option<Vec<_>>>()
-        else {
-            return Some(Err(
-                "executor completion result has a malformed unmet list".into()
-            ));
-        };
-        return Some(match (status, unmet.is_empty()) {
-            ("complete", true) => Ok(()),
-            ("complete", false) | ("incomplete", false) => Err(format!(
-                "executor reported unmet acceptance: {}",
-                unmet.join("; ")
-            )),
-            ("incomplete", true) => Err("executor reported incomplete work".into()),
-            _ => Err(format!(
-                "executor reported unknown summoner status {status:?}"
-            )),
-        });
-    }
-    None
-}
-
-#[cfg(test)]
-mod worker_result_tests {
-    use super::parse_worker_result;
-
-    #[test]
-    fn complete_requires_an_empty_unmet_list() {
-        assert!(matches!(
-            parse_worker_result(r#"{"summoner_status":"complete","unmet":[]}"#),
-            Some(Ok(()))
-        ));
-        assert!(matches!(
-            parse_worker_result(
-                r#"{"summoner_status":"complete","unmet":["wire test"]}"#
-            ),
-            Some(Err(reason)) if reason.contains("wire test")
-        ));
-    }
-
-    #[test]
-    fn incomplete_and_malformed_results_fail_closed() {
-        assert!(matches!(
-            parse_worker_result(
-                r#"{"summoner_status":"incomplete","unmet":["Windows artifact"]}"#
-            ),
-            Some(Err(reason)) if reason.contains("Windows artifact")
-        ));
-        assert!(matches!(
-            parse_worker_result(r#"{"summoner_status":"complete"}"#),
-            Some(Err(_))
-        ));
-    }
-
-    #[test]
-    fn only_the_trailing_window_is_trusted() {
-        let buried = format!(
-            "{}\n{}",
-            r#"{"summoner_status":"complete","unmet":[]}"#,
-            (0..11).map(|_| "footer").collect::<Vec<_>>().join("\n")
-        );
-        assert!(parse_worker_result(&buried).is_none());
     }
 }

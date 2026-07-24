@@ -232,13 +232,13 @@ mod tests {
             kimi.backend.argv,
             [
                 "kimi",
-                "--auto",
+                "--prompt",
+                "{prompt}",
                 "--add-dir",
                 "{git_common_dir}",
-                "--prompt",
-                "{prompt}"
             ]
         );
+        assert_eq!(kimi.reviewer.argv, ["kimi", "--prompt", "{prompt}"]);
     }
 
     #[test]

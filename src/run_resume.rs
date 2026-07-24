@@ -243,33 +243,46 @@ fn enforce_live_policy_floor(current: &Config, recorded: &Config, run_id: &str) 
     Ok(())
 }
 
-/// Emergency bans on the live policy apply to residual resume work even when the
+/// Live policy bans and allow-lists apply to residual resume work even when the
 /// recorded policy authorized the original dispatch.
 fn refuse_live_revocations(current: &Config, orders: &[Order]) -> Result<()> {
     let Some(live) = current.trusted_policy.as_ref() else {
         return Ok(());
     };
-    if live.revoked_executors.is_empty() && live.revoked_reviewers.is_empty() {
-        return Ok(());
-    }
     let mut problems = Vec::new();
     for order in orders {
         let executor = order.executor_name(current);
-        if let Some(executor) = executor.as_deref()
-            && live.revoked_executors.iter().any(|name| name == executor)
-        {
-            problems.push(format!(
-                "order {:?}: live trusted policy revokes executor {executor:?}",
-                order.id
-            ));
+        if let Some(executor) = executor.as_deref() {
+            if live.revoked_executors.iter().any(|name| name == executor) {
+                problems.push(format!(
+                    "order {:?}: live trusted policy revokes executor {executor:?}",
+                    order.id
+                ));
+            }
+            if !live.allowed_executors.is_empty()
+                && !live.allowed_executors.iter().any(|name| name == executor)
+            {
+                problems.push(format!(
+                    "order {:?}: live trusted policy does not allow executor {executor:?}",
+                    order.id
+                ));
+            }
         }
-        if let Some(reviewer) = order.reviewer_name(current)
-            && live.revoked_reviewers.iter().any(|name| name == &reviewer)
-        {
-            problems.push(format!(
-                "order {:?}: live trusted policy revokes reviewer {reviewer:?}",
-                order.id
-            ));
+        if let Some(reviewer) = order.reviewer_name(current) {
+            if live.revoked_reviewers.iter().any(|name| name == &reviewer) {
+                problems.push(format!(
+                    "order {:?}: live trusted policy revokes reviewer {reviewer:?}",
+                    order.id
+                ));
+            }
+            if !live.allowed_reviewers.is_empty()
+                && !live.allowed_reviewers.iter().any(|name| name == &reviewer)
+            {
+                problems.push(format!(
+                    "order {:?}: live trusted policy does not allow reviewer {reviewer:?}",
+                    order.id
+                ));
+            }
         }
     }
     if !problems.is_empty() {

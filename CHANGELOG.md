@@ -27,6 +27,16 @@ versioning.
 - Doctor / installer / skill first-run text no longer push a Codex-only default.
 - Git host dirty-worktree refuse and honest land aggregate (carried from 0.2.x
   tip work).
+- A present policy signature that fails verification always refuses dispatch
+  (not only when `require_signature = true`).
+- `summoner land` picks the latest finished run by `report.json` mtime, not
+  lexicographic path order.
+- Successful land rewrites `assurance_envelope.json` with the sealed integration
+  candidate `I`.
+- Resume re-checks live `allowed_executors` / `allowed_reviewers` (not only
+  revocations).
+- Kimi preset argv no longer pairs `--prompt` with `--auto`/`--plan` (kimi-code
+  ≥0.28 rejects those combinations).
 
 ## 0.2.0 — 2026-07-23
 

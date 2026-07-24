@@ -229,12 +229,14 @@ impl TrustedPolicy {
                     None => Ok(None),
                     Some(pk) => {
                         let ok = crate::policy_crypto::verify_ed25519(&pk, &digest, sig)?;
-                        if self.require_signature && !ok {
+                        // A present signature that fails verification always refuses —
+                        // require_signature only controls missing signature / missing key.
+                        if !ok {
                             anyhow::bail!(
                                 "trusted_policy ed25519 signature does not match SUMMONER_POLICY_PUBKEY"
                             );
                         }
-                        Ok(Some(ok))
+                        Ok(Some(true))
                     }
                 }
             }
@@ -254,12 +256,12 @@ impl TrustedPolicy {
                             sig.as_bytes(),
                             expected.as_bytes(),
                         );
-                        if self.require_signature && !ok {
+                        if !ok {
                             anyhow::bail!(
                                 "trusted_policy signature does not match SUMMONER_POLICY_KEY"
                             );
                         }
-                        Ok(Some(ok))
+                        Ok(Some(true))
                     }
                 }
             }

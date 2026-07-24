@@ -202,7 +202,14 @@ fn policy_signature_is_excluded_from_digest_and_verifies_with_key() {
     assert_eq!(policy.verify_signature().unwrap(), Some(true));
 
     policy.signature = Some("0".repeat(64));
-    assert_eq!(policy.verify_signature().unwrap(), Some(false));
+    // Invalid signature always refuses (not only when require_signature is set).
+    assert!(
+        policy
+            .verify_signature()
+            .unwrap_err()
+            .to_string()
+            .contains("does not match")
+    );
     policy.require_signature = true;
     assert!(
         policy
@@ -233,9 +240,7 @@ fn policy_ed25519_signature_verifies_with_pubkey() {
     }
     assert_eq!(policy.verify_signature().unwrap(), Some(true));
     unsafe { std::env::set_var("SUMMONER_POLICY_PUBKEY", "00".repeat(32)) };
-    assert!(
-        policy.verify_signature().is_err() || policy.verify_signature().unwrap() == Some(false)
-    );
+    assert!(policy.verify_signature().is_err());
     unsafe { std::env::remove_var("SUMMONER_POLICY_PUBKEY") };
 }
 
