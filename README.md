@@ -58,7 +58,7 @@ You need git and at least one authenticated model CLI
 | --- | --- |
 | Fleets only (any git repo) | **Summoner only** + `[host] kind = "git"` in `.summoner.toml` |
 | Fleets + CoW lanes + receipt-bound verify | Summoner + [Grove](https://github.com/thomgardiner/grove) (default when `.grove.toml` + `grove` on PATH) |
-| Land gates against mutation/coverage | Optional [Crucible](https://github.com/thomgardiner/crucible); set `SUMMONER_LAND_CRUCIBLE=1` |
+| Land gates against mutation/coverage | Optional [Crucible](https://github.com/thomgardiner/crucible); set `SUMMONER_LAND_CRUCIBLE=check` (or `harden` / `run`) |
 
 ```sh
 # Optional Grove (Rust monorepos, warm lanes)
