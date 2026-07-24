@@ -22,7 +22,7 @@ install-updater = true
 install-success-msg = """
 summoner installed. Next:
 
-  summoner setup --preset codex   # or claude / kimi — harness skills + recipe
+  summoner setup                  # interactive model wizard (or --preset …)
   # Claude: /summoner · Codex/Grok: skill name summoner
   summoner doctor
 """

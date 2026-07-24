@@ -1,6 +1,6 @@
 [package]
 name = "summoner"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Fleet runner for LLM coding agents: host-pluggable worktrees (git or Grove), vendor-neutral executors, independent review, durable reports."
 license = "MIT"

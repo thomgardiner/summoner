@@ -23,7 +23,7 @@ parallel dispatch path.
 | Claude Code | `/summoner` or “run a Summoner fleet” |
 | Codex | skill loads from `~/.codex/skills/summoner`; ask to plan/run orders |
 | Shell | `summoner plan orders/` → `summoner run --stream orders/` |
-| First install | `summoner setup --preset codex` (or `claude` / `kimi`) |
+| First install | `summoner setup` (wizard) or `--preset <codex|claude|kimi>` |
 
 ## Framing
 

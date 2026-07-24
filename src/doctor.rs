@@ -113,7 +113,7 @@ fn inspect(
     let default_executor = config.default_executor();
     if !has_orders && default_executor.is_none() {
         next.push(
-            "select a default with `summoner init --global --preset codex` (or name an executor in every order)"
+            "select a model with `summoner setup` (wizard) or `summoner setup --preset <codex|claude|kimi>` (or name an executor in every order)"
                 .to_string(),
         );
     }
@@ -123,7 +123,7 @@ fn inspect(
             "no harness skill installed (Claude /summoner, Codex, Agents, Grok); run `summoner setup`"
                 .into(),
         );
-        next.push("summoner setup --preset codex   # skills + executor recipe".into());
+        next.push("summoner setup   # skills + model wizard (session or permanent)".into());
     } else {
         notes.push(format!(
             "harness skills: {}",

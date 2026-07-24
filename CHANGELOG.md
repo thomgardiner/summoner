@@ -5,13 +5,28 @@ versioning.
 
 ## Unreleased
 
+## 0.3.0 — 2026-07-24
+
+### Added
+
+- Setup wizard with **no default model**: `summoner setup` lists recipes and
+  PATH status; choose **this session** or **permanent** config. Session-only
+  via `--session` / `SUMMONER_SESSION_CONFIG`; clear with `--clear-session`.
+- Policy authentication: legacy MAC and **ed25519** (`ed25519:` signatures,
+  `SUMMONER_POLICY_PUBKEY`). CLI: `summoner policy keygen|sign|verify`.
+- Integration land seals immutable candidate `I`, optional
+  `SUMMONER_LAND_CRUCIBLE` and `SUMMONER_LAND_REVIEW` gates against `I`,
+  retains refs only after gates pass, FF specifically to `I`.
+- `assurance_envelope.json` on each run; Grove `candidate capture` identity
+  on grove-host finish when available.
+- `summoner impact` baseline deltas for delivery economics (descriptive only).
+- Host conformance tests for land seal and gate refusal.
+
 ### Fixed
 
-- Git host exact-state: verify/finish/review **refuse a dirty worktree**, so
-  dirty-after-verify can no longer mint `verified` against HEAD alone. Binding
-  digests use `commit\\0tree`. Land refuses a silent no-op aggregate gate
-  (set `SUMMONER_LAND_VERIFY`, provide `Cargo.toml`, or explicit
-  `SUMMONER_LAND_ALLOW_NO_AGGREGATE=1`). README documents Grove vs git assurance.
+- Doctor / installer / skill first-run text no longer push a Codex-only default.
+- Git host dirty-worktree refuse and honest land aggregate (carried from 0.2.x
+  tip work).
 
 ## 0.2.0 — 2026-07-23
 

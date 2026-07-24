@@ -118,6 +118,6 @@ fn doctor_without_default_is_actionable_and_non_green() {
     assert_eq!(report["ok"], false);
     assert!(report["next_steps"].as_array().unwrap().iter().any(|step| {
         step.as_str()
-            .is_some_and(|step| step.contains("init --global --preset codex"))
+            .is_some_and(|step| step.contains("summoner setup"))
     }));
 }

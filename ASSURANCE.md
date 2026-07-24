@@ -70,9 +70,9 @@ manifest/report/review. Identity fields: `policy_id`, `policy_version`,
 public-key crypto), plus `revoked_executors` / `revoked_reviewers`. Resume
 enforces the live epoch floor and re-checks live revocations against residual
 orders. No model recipe is pre-installed: `summoner setup` wizard (session or
-permanent) selects executors. Policy auth supports legacy MAC and ed25519
-(`ed25519:` signatures, `SUMMONER_POLICY_PUBKEY` / `summoner policy keygen|sign|verify`).
-Tool-digest bans at dispatch remain open.
+permanent) selects executors. Policy auth supports **legacy MAC** and **ed25519**
+public-key signatures (`ed25519:` prefix, `SUMMONER_POLICY_PUBKEY`;
+`summoner policy keygen|sign|verify`). Tool-digest bans at dispatch remain open.
 
 **Owner (interim):** Summoner config  
 **Executable tests:** repo cannot publish policy; digest/signature/epoch/revoke
