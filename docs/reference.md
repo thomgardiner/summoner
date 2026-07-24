@@ -72,11 +72,11 @@ Each run directory holds:
 - `report.json`: projected from terminal journal records after `run_finished`.
   A hard-killed run has no report, correctly. Each order records
   `candidate_commit`, the exact commit captured in the worktree before release,
-  and only when the tree is clean: verification accepts uncommitted work, so a
-  dirty candidate is HEAD plus a delta no commit names, and recording HEAD
-  would misidentify it. Release may salvage dirty state into a new commit and
-  advance the branch, so the branch name alone never identifies what was
-  reviewed either.
+  and only when the tree is clean. **Git-host** verify/finish refuse a dirty
+  tree (clean committed candidates only). **Grove-host** verification is
+  snapshot-bound to the workspace digest rather than "uncommitted is fine."
+  Release may salvage dirty state into a new commit and advance the branch, so
+  the branch name alone never identifies what was reviewed either.
 
 `resume <run-id>` replays from the manifest and journal, not order files.
 Different executor path or digest: refused. Carried forward: `verified` and
@@ -170,23 +170,27 @@ reports them.
 
 ## Landing
 
-`summoner land [run-id]` integrates a finished run's verified candidate commits
-into the current branch, in dependency order. It defaults to the latest finished
-run. This is the gated apply, not an auto-merge: you still author the review;
-`land` only touches candidates that already passed the run's bar (`verified`, or
+`summoner land [run-id]` is the gated apply onto a protected branch. It defaults
+to the latest finished run (by `report.json` mtime). You still own the review;
+`land` only uses candidates that already passed the run's bar (`verified`, or
 `approved` when a reviewer ran) and merges the exact `candidate_commit` the
-report recorded, not whatever the branch points at now.
+report recorded.
 
-An order is set aside — with a reason in the report — when it is non-green, has
-no candidate commit, or depends on an order that was itself set aside. Landable
-orders merge in topological order, fast-forwarding when git can. The first
-conflict stops the run: that merge is aborted, the earlier merges stay
-committed, the working tree is left clean, and `land` exits 1 naming the
-conflicted order and what remains. Resolve it by hand, then land again.
+**What it does (integration seal I):**
 
-`land` refuses a dirty working tree, and must run in the repository the run
-targeted. `--dry-run` prints the plan (landable order and what is set aside)
-without merging.
+1. Plan landable orders in dependency order; skip non-green / missing commits.
+2. Merge candidates onto a **temporary integration branch** (not the protected
+   tip yet). A conflict aborts that merge, leaves the protected target
+   unchanged, and exits 1.
+3. Capture sealed integration candidate `I` (commit + tree of the merged tip),
+   then run optional aggregate / Crucible / holder gates against `I`.
+4. Bind `I` into the run's `assurance_envelope.json` **before** advancing the
+   protected branch.
+5. Fast-forward the protected target specifically to sealed `I`; drop the temp
+   branch.
+
+`land` refuses a dirty working tree and must run in the repository the run
+targeted. `--dry-run` prints the plan without merging.
 
 ## Overview
 
@@ -217,7 +221,7 @@ object carries the Grove capability pin.
 | Deadline | Summoner process-group supervision (Unix; Windows not yet) | `grove task exec --timeout-secs` |
 | Verify | Optional `[verification]`; missing profile is a **fail**, not a free pass. No required profiles → finish is `completed`, not `verified` | `.grove.toml` profiles + receipts |
 | CoW lanes / governor | No | Yes |
-| Inspection capsule | Weak (review in worktree) | Private Grove capsule |
+| Inspection capsule | Detached private worktree + post-exec HEAD/clean checks | Private Grove capsule |
 
 Resolution order: explicit `[host] kind` → legacy `grove_bin` → `.grove.toml`
 plus grove on PATH → **git**.

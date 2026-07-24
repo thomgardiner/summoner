@@ -45,25 +45,33 @@ irm https://github.com/thomgardiner/summoner/releases/latest/download/summoner-i
 summoner setup
 ```
 
-Optional Grove (Rust monorepos, warm lanes) — install both if you want fleets
-**and** CoW lanes:
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
-grove setup
-```
-
-Use either product alone: Summoner with `[host] kind = "git"` needs no Grove;
-Grove never launches models and never depends on Summoner.
-
-The installers verify release checksums and also install `summoner-update` (and
-`grove-update` when you install Grove). Source install:
-`cargo install --git https://github.com/thomgardiner/summoner --locked`.
+The installer verifies release checksums and also installs `summoner-update`.
+Source install: `cargo install --git https://github.com/thomgardiner/summoner --locked`.
 You need git and at least one authenticated model CLI
 ([Codex](https://github.com/openai/codex#installing-and-running-codex-cli),
 [Claude Code](https://code.claude.com/docs/en/installation),
 [Kimi](https://www.kimi.com/code/docs/en/)).
+
+### Alone or with the stack
+
+| Goal | Install |
+| --- | --- |
+| Fleets only (any git repo) | **Summoner only** + `[host] kind = "git"` in `.summoner.toml` |
+| Fleets + CoW lanes + receipt-bound verify | Summoner + [Grove](https://github.com/thomgardiner/grove) (default when `.grove.toml` + `grove` on PATH) |
+| Land gates against mutation/coverage | Optional [Crucible](https://github.com/thomgardiner/crucible); set `SUMMONER_LAND_CRUCIBLE=1` |
+
+```sh
+# Optional Grove (Rust monorepos, warm lanes)
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/thomgardiner/grove/releases/latest/download/grove-installer.sh | sh
+grove setup
+
+# Optional Crucible (honesty arms for harden/cover)
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/thomgardiner/crucible/releases/latest/download/crucible-installer.sh | sh
+```
+
+Stack invariants: [ASSURANCE.md](ASSURANCE.md) (epoch 1).
 
 ### First-run setup (skills + recipe)
 

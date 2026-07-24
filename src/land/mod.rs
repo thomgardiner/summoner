@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use git::{canonical, git};
 use merge::merge_candidates;
 use plan::{candidates, plan_landing};
-use report::{latest_finished_run, report_result};
+use report::{bind_integration_envelope, latest_finished_run, report_result};
 use seal::{
     abandon_integration, advance_to_integration, seal_and_gate,
 };
@@ -91,6 +91,9 @@ pub fn land(run_id: Option<String>, dry_run: bool) -> Result<i32> {
         return Ok(1);
     }
 
+    // Bind sealed I into the envelope *before* FF so a crash between advance
+    // and report cannot leave the protected tip at I without land evidence.
+    bind_integration_envelope(&run_dir, integration_candidate.as_ref())?;
     advance_to_integration(
         &repo,
         &target_branch,
@@ -133,7 +136,6 @@ fn load_landing_context(run_dir: &Path) -> Result<(PathBuf, Plan)> {
     Ok((repo, plan))
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::plan::plan_landing;

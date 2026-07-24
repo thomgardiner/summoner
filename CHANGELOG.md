@@ -19,6 +19,8 @@ versioning.
   retains refs only after gates pass, FF specifically to `I`.
 - `assurance_envelope.json` on each run; Grove `candidate capture` identity
   on grove-host finish when available.
+- Successful land binds sealed `I` into the envelope **before** fast-forwarding
+  the protected branch (durable if advance crashes mid-way).
 - `summoner impact` baseline deltas for delivery economics (descriptive only).
 - Host conformance tests for land seal and gate refusal.
 
@@ -31,12 +33,11 @@ versioning.
   (not only when `require_signature = true`).
 - `summoner land` picks the latest finished run by `report.json` mtime, not
   lexicographic path order.
-- Successful land rewrites `assurance_envelope.json` with the sealed integration
-  candidate `I`.
 - Resume re-checks live `allowed_executors` / `allowed_reviewers` (not only
   revocations).
 - Kimi preset argv no longer pairs `--prompt` with `--auto`/`--plan` (kimi-code
   ≥0.28 rejects those combinations).
+- Landing / host docs match sealed-`I` behavior and git-host clean-tree verify.
 
 ## 0.2.0 — 2026-07-23
 
