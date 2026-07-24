@@ -65,6 +65,14 @@ impl Fixture {
         self.command(args).output().expect("run summoner")
     }
 
+    pub fn run_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut command = self.command(args);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command.output().expect("run summoner")
+    }
+
     pub fn config_path(&self) -> PathBuf {
         self.config.join("summoner").join("config.toml")
     }

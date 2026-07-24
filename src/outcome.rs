@@ -61,6 +61,17 @@ pub(crate) fn finalize(
             None
         }
     };
+    // Prefer Grove's first-class candidate object when the host can produce it.
+    if ctx.host.kind() == "grove"
+        && let Some(task_id) = report.task_id.as_deref()
+        && let Ok(identity) =
+            crate::grove::GroveCli::new(ctx.config.grove_bin()).candidate_capture(worktree, task_id)
+    {
+        if let Some(commit) = identity["candidate_commit"].as_str() {
+            report.candidate_commit = Some(commit.to_string());
+        }
+        report.candidate_identity = Some(identity);
+    }
     if let Some(path) = &report.stdout_log {
         report.stdout_tail = executor::tail(Path::new(path), TAIL_BYTES);
     }

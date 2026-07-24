@@ -14,6 +14,65 @@ pub fn global_path() -> Option<PathBuf> {
     )
 }
 
+/// Session-only executor config (this login / cache lifetime). Overrides global
+/// defaults when present. Not a trust boundary for repo policy.
+pub fn session_path() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("SUMMONER_SESSION_CONFIG") {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
+    session_path_for(
+        cfg!(windows),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("XDG_CACHE_HOME"),
+        std::env::var_os("LOCALAPPDATA"),
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        std::env::temp_dir(),
+    )
+}
+
+fn session_path_for(
+    windows: bool,
+    runtime: Option<OsString>,
+    cache: Option<OsString>,
+    local_app_data: Option<OsString>,
+    home: Option<OsString>,
+    user_profile: Option<OsString>,
+    temp: PathBuf,
+) -> Option<PathBuf> {
+    let present = |value: Option<OsString>| value.filter(|value| !value.is_empty());
+    if let Some(runtime) = present(runtime) {
+        return Some(PathBuf::from(runtime).join("summoner").join("session.toml"));
+    }
+    let root = if windows {
+        present(local_app_data)
+            .map(PathBuf::from)
+            .or_else(|| {
+                present(user_profile)
+                    .or_else(|| present(home))
+                    .map(PathBuf::from)
+                    .map(|path| path.join("AppData").join("Local"))
+            })
+            .unwrap_or(temp)
+            .join("summoner")
+    } else {
+        present(cache)
+            .map(PathBuf::from)
+            .or_else(|| {
+                present(home)
+                    .or_else(|| present(user_profile))
+                    .map(PathBuf::from)
+                    .map(|path| path.join(".cache"))
+            })
+            .unwrap_or(temp)
+            .join("summoner")
+    };
+    Some(root.join("session.toml"))
+}
+
 pub(crate) struct GroveProfiles {
     pub path: Option<PathBuf>,
     pub names: BTreeSet<String>,
@@ -215,6 +274,19 @@ pub(super) fn load_from(cwd: &Path) -> Result<Resolved> {
         merge(&mut config, global);
         sources.push(path.display().to_string());
     }
+    // Session overrides global for personal executor choice (this login only).
+    if let Some(path) = session_path()
+        && let Some(session) = read(&path)?
+    {
+        if session.trusted_policy.is_some() {
+            anyhow::bail!(
+                "{} cannot set trusted_policy; the acceptance bar belongs in the personal global config",
+                path.display()
+            );
+        }
+        merge(&mut config, session);
+        sources.push(path.display().to_string());
+    }
     if let Some(path) = repo_config_path_from(cwd)
         && let Some(repo) = read(&path)?
     {
@@ -259,6 +331,34 @@ pub(super) fn env_bool(key: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_path_prefers_runtime_then_cache() {
+        assert_eq!(
+            session_path_for(
+                false,
+                Some("/run/user/1".into()),
+                Some("/cache".into()),
+                None,
+                Some("/home/me".into()),
+                None,
+                PathBuf::from("/tmp"),
+            ),
+            Some(PathBuf::from("/run/user/1/summoner/session.toml"))
+        );
+        assert_eq!(
+            session_path_for(
+                false,
+                None,
+                Some("/cache".into()),
+                None,
+                Some("/home/me".into()),
+                None,
+                PathBuf::from("/tmp"),
+            ),
+            Some(PathBuf::from("/cache/summoner/session.toml"))
+        );
+    }
 
     #[test]
     fn config_paths_follow_each_platforms_native_convention() {

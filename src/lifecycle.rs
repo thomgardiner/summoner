@@ -49,7 +49,7 @@ pub(crate) fn inspect(
     for name in roles {
         let Some(backend) = config.executors.get(name) else {
             next.push(format!(
-                "executor {name:?} is not configured; install its preset or edit {}",
+                "executor {name:?} is not configured; run `summoner setup` or edit {}",
                 global_path()
             ));
             continue;

@@ -7,7 +7,7 @@ mod load;
 mod tests;
 
 pub(crate) use load::{GroveProfiles, grove_profiles};
-pub use load::{global_path, load, select_profile};
+pub use load::{global_path, load, select_profile, session_path};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;

@@ -160,6 +160,11 @@ pub(crate) fn execute(
         started.elapsed().as_secs(),
         orders,
     );
+    publish_run_report(&ctx, &run_dir, &report)?;
+    Ok(report.exit_code())
+}
+
+fn publish_run_report(ctx: &Ctx<'_>, run_dir: &std::path::Path, report: &RunReport) -> Result<()> {
     // Fail closed: record run_finished before publishing report.json or the scorecard.
     ctx.events.emit(
         "run_finished",
@@ -172,20 +177,21 @@ pub(crate) fn execute(
             "report_path": run_dir.join("report.json").display().to_string(),
         }),
     )?;
-    crate::run_evidence::write_once(&run_dir.join("report.json"), &report)
+    crate::run_evidence::write_once(&run_dir.join("report.json"), report)
         .context("writing report.json")?;
-    crate::scorecard::record(&runs_root(), &report);
+    let envelope = crate::assurance_envelope::from_run(report, None);
+    crate::run_evidence::write_once(&run_dir.join("assurance_envelope.json"), &envelope)
+        .context("writing assurance_envelope.json")?;
+    crate::scorecard::record(&runs_root(), report);
     if ctx.events.streaming() {
-        // Stream consumers get the complete report as the final NDJSON line;
-        // the pretty print would break line-oriented parsers.
         println!(
             "{}",
-            serde_json::json!({"event": "report", "report": &report})
+            serde_json::json!({"event": "report", "report": report})
         );
     } else {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!("{}", serde_json::to_string_pretty(report)?);
     }
-    Ok(report.exit_code())
+    Ok(())
 }
 
 pub(crate) fn runs_root() -> PathBuf {

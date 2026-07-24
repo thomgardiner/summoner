@@ -43,6 +43,32 @@ pub fn global(name: Option<PresetName>) -> Result<Report> {
     })
 }
 
+/// Write or merge a preset into an arbitrary config path (session or global).
+pub fn write_preset_config(path: &Path, preset: &Preset) -> Result<Report> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            "# Summoner session executor configuration (not permanent).\n".to_string()
+        }
+        Err(error) => return Err(error).context("reading config"),
+    };
+    let updated = install(path, &existing, preset)?;
+    if path.exists()
+        && let Ok(current) = std::fs::read_to_string(path)
+        && current == updated
+    {
+        return Ok(skipped(path.to_path_buf()));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("creating config directory")?;
+    }
+    write_atomic(path, updated.as_bytes()).context("writing config")?;
+    Ok(Report {
+        written: vec![path.display().to_string()],
+        skipped: Vec::new(),
+    })
+}
+
 pub(super) fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     write_atomic_with(path, contents, replace)
 }

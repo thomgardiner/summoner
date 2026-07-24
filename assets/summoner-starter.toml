@@ -2,10 +2,11 @@
 # where they came from. Precedence: SUMMONER_* env > repo .summoner.toml
 # (found by ancestor walk) > the platform-native personal config > defaults.
 #
-# This repo starter selects no model. Install one of Summoner's versioned,
-# credential-free global recipes with `summoner init --global --preset codex`
-# (or `claude` / `kimi`), or define a custom executor in personal config.
-# Keep this file for repo policy; same-named repo executors override globals.
+# This starter selects no model. Run `summoner setup` (interactive wizard) or
+# `summoner setup --preset <codex|claude|kimi>` (or `init --global --preset …`)
+# to install a recipe permanently; add `--session` for this login only.
+# Custom executors go in personal config. Keep this file for repo policy;
+# same-named repo executors override globals.
 
 # default_executor       = "mytool"
 # default_reviewer       = "othertool" # independent review gate: judges each

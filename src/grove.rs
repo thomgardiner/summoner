@@ -237,6 +237,12 @@ impl GroveCli {
         serde_json::from_value(value).context("parsing grove verify report")
     }
 
+    /// Capture Grove's immutable candidate object (ASSURANCE I1). Optional on
+    /// older grove binaries — callers treat failure as soft.
+    pub fn candidate_capture(&self, worktree: &Path, task_id: &str) -> Result<serde_json::Value> {
+        self.domain(worktree, &["candidate", "capture", "--task-id", task_id])
+    }
+
     pub fn task_finish(
         &self,
         worktree: &Path,

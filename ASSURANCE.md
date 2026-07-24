@@ -69,7 +69,9 @@ manifest/report/review. Identity fields: `policy_id`, `policy_version`,
 (operator key via `SUMMONER_POLICY_KEY`, domain-separated SHA-256 MAC — not
 public-key crypto), plus `revoked_executors` / `revoked_reviewers`. Resume
 enforces the live epoch floor and re-checks live revocations against residual
-orders. Public-key signatures and tool-digest bans remain open.
+orders. No model recipe is pre-installed: `summoner setup` wizard (session or
+permanent) selects executors. Public-key signatures and tool-digest bans remain
+open.
 
 **Owner (interim):** Summoner config  
 **Executable tests:** repo cannot publish policy; digest/signature/epoch/revoke

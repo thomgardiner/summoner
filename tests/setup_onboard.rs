@@ -232,3 +232,48 @@ fn example_does_not_generate_a_lock_for_user_owned_grove_config() {
     success(fixture.run(&["init", "--example"]));
     assert!(!fixture.repo.join("Cargo.lock").exists());
 }
+
+#[test]
+fn session_preset_does_not_write_global_config() {
+    let fixture = Fixture::new();
+    let session = fixture.config.join("session.toml");
+    let output = fixture.run_with_env(
+        &["setup", "--preset", "claude", "--session"],
+        &[("SUMMONER_SESSION_CONFIG", session.to_str().unwrap())],
+    );
+    success(output.clone());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["wizard"]["scope"], "session");
+    assert_eq!(report["wizard"]["executor"], "claude");
+    assert!(session.is_file(), "session file written");
+    // Global personal config must not be created for session-only setup.
+    assert!(
+        !fixture.config_path().exists() || {
+            let text = std::fs::read_to_string(fixture.config_path()).unwrap_or_default();
+            !text.contains("default_executor = \"claude\"")
+        },
+        "session setup must not install permanent default_executor"
+    );
+    let session_text = std::fs::read_to_string(&session).unwrap();
+    assert!(session_text.contains("default_executor = \"claude\""));
+    assert!(session_text.contains("[executors.claude]"));
+}
+
+#[test]
+fn clear_session_removes_session_file() {
+    let fixture = Fixture::new();
+    let session = fixture.config.join("session.toml");
+    success(fixture.run_with_env(
+        &["setup", "--preset", "kimi", "--session"],
+        &[("SUMMONER_SESSION_CONFIG", session.to_str().unwrap())],
+    ));
+    assert!(session.is_file());
+    let output = fixture.run_with_env(
+        &["setup", "--clear-session"],
+        &[("SUMMONER_SESSION_CONFIG", session.to_str().unwrap())],
+    );
+    success(output.clone());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["session_cleared"].as_str().is_some());
+    assert!(!session.exists());
+}

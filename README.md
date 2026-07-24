@@ -32,7 +32,9 @@ macOS or Linux:
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.sh | sh
-summoner setup --preset codex    # harness skills (/summoner) + executor recipe
+summoner setup                   # harness skills + interactive model wizard
+# or: summoner setup --preset claude   # / codex / kimi
+# or: summoner setup --preset kimi --session   # this login only
 ```
 
 Windows PowerShell:
@@ -40,7 +42,7 @@ Windows PowerShell:
 ```powershell
 $ErrorActionPreference = "Stop"
 irm https://github.com/thomgardiner/summoner/releases/latest/download/summoner-installer.ps1 | iex
-summoner setup --preset codex
+summoner setup
 ```
 
 Optional Grove (Rust monorepos, warm lanes) — install both if you want fleets
@@ -65,10 +67,16 @@ You need git and at least one authenticated model CLI
 
 ### First-run setup (skills + recipe)
 
+No model is pre-selected. The wizard lists shipped recipes and which binaries
+are on PATH, then asks whether to save for this session only or permanently.
+
 ```sh
-summoner setup --preset codex    # or claude / kimi
+summoner setup                   # interactive
+summoner setup --preset claude   # non-interactive permanent
+summoner setup --preset kimi --session
+summoner setup --clear-session
 # In a project you want fleets in:
-summoner setup --preset codex --repo
+summoner setup --repo
 ```
 
 `setup` installs a **user-level skill** so harnesses can invoke Summoner without
@@ -87,7 +95,7 @@ upgrades.
 ## Use
 
 ```sh
-summoner setup --preset codex --repo   # skills + executors + AGENTS.md
+summoner setup --repo                  # skills + AGENTS.md (pick model via wizard first)
 summoner init --example                # sample order (if not already)
 # optional: force independence even in a Rust tree
 #   echo '[host]\nkind = "git"' >> .summoner.toml

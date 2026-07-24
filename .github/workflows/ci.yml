@@ -40,7 +40,7 @@ jobs:
           --test init_atomic
           --test anti_reward_stack --test fault_injection
           --test anti_reward_scope --test anti_reward_verify
-          --test host_git --test land
+          --test host_git --test land --test host_conformance
 
   fleet:
     runs-on: ${{ matrix.os }}

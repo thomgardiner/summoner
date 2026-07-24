@@ -1,5 +1,6 @@
 //! Model-neutral fleet runner for coding-agent CLIs.
 
+mod assurance_envelope;
 mod backend_provenance;
 mod config;
 mod doctor;
@@ -35,6 +36,7 @@ mod setup;
 mod skills;
 mod tripwires;
 mod watch;
+mod wizard;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -46,10 +48,11 @@ use std::path::PathBuf;
     name = "summoner",
     version,
     about = "Host-pluggable fleet runner for coding-agent CLIs (git host by default; Grove optional).",
-    after_help = "First run:  summoner setup --preset codex\n\
+    after_help = "First run:  summoner setup                 # wizard (pick a model CLI)\n\
+                  Or:         summoner setup --preset claude # or codex / kimi\n\
+                  Session:    summoner setup --preset kimi --session\n\
                   Project:    summoner setup --repo && summoner init --example\n\
-                  Invoke:     Claude /summoner · Codex skill · shell: summoner plan|run\n\
-                  Hosts:      [host] kind = \"git\" | \"grove\"  (independence vs Rust depth)"
+                  Hosts:      [host] kind = \"git\" | \"grove\""
 )]
 struct Cli {
     /// Orchestrator profile from `[profiles.<name>]` in the config.
@@ -79,14 +82,23 @@ enum Cmd {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
-    /// First-run ergonomics: install harness skills, optional model preset, next steps.
+    /// First-run ergonomics: skills + executor wizard (no model is pre-selected).
     ///
-    /// After a binary install, run this once so Claude (`/summoner`), Codex, and
-    /// Grok can load the Summoner skill without per-repo hunting.
+    /// Run after install. Interactive when a TTY is available; otherwise pass
+    /// `--preset`. Session-only recipes do not write permanent global config.
     Setup {
-        /// Install a versioned executor recipe (codex, claude, kimi).
+        /// Install a versioned executor recipe (codex, claude, kimi). None → wizard.
         #[arg(long, value_enum)]
         preset: Option<presets::PresetName>,
+        /// Apply `--preset` (or wizard choice) only for this session.
+        #[arg(long)]
+        session: bool,
+        /// Force the interactive wizard.
+        #[arg(long)]
+        wizard: bool,
+        /// Remove the session-only config file.
+        #[arg(long)]
+        clear_session: bool,
         /// Overwrite managed skill files that drifted.
         #[arg(long)]
         refresh: bool,
@@ -194,10 +206,23 @@ fn dispatch() -> Result<i32> {
         ),
         Cmd::Setup {
             preset,
+            session,
+            wizard,
+            clear_session,
             refresh,
             repo,
         } => {
-            let report = setup::setup(&std::env::current_dir()?, preset, refresh, repo)?;
+            let report = setup::setup(
+                &std::env::current_dir()?,
+                setup::SetupArgs {
+                    preset,
+                    session,
+                    wizard,
+                    clear_session,
+                    refresh,
+                    repo,
+                },
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(0)
         }
@@ -214,10 +239,14 @@ fn dispatch() -> Result<i32> {
         Cmd::Check { paths } => check(&resolved()?.config, &paths),
         Cmd::Plan { paths } => plan::plan(&resolved()?.config, &paths),
         Cmd::Run { paths, stream } => {
-            let resolved = resolved()?;
+            let mut loaded = resolved()?;
+            if wizard::needs_executor(&loaded.config) {
+                wizard::ensure_executor_or_wizard(&loaded.config)?;
+                loaded = resolved()?;
+            }
             run::run(
-                &resolved.config,
-                resolved.selected_profile.as_deref(),
+                &loaded.config,
+                loaded.selected_profile.as_deref(),
                 &paths,
                 stream,
                 cli.allow_unknown_auth,

@@ -202,6 +202,9 @@ pub struct OrderReport {
     /// this does, and it is what any later accept step must integrate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_commit: Option<String>,
+    /// Grove `candidate capture` object when the host produced one (I1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_identity: Option<serde_json::Value>,
     /// How many executor attempts this order took (1 = no revisions).
     pub attempts: u64,
     /// The executor's own session identifier, when a `session_marker`
@@ -273,6 +276,7 @@ impl OrderReport {
             branch: None,
             base_commit: None,
             candidate_commit: None,
+            candidate_identity: None,
             attempts: 1,
             session_id: None,
             commits: 0,

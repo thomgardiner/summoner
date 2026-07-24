@@ -7,7 +7,7 @@ mod global;
 mod tests;
 
 use anyhow::{Context, Result};
-pub use global::global;
+pub use global::{global, write_preset_config};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
