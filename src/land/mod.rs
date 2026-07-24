@@ -15,9 +15,7 @@ use git::{canonical, git};
 use merge::merge_candidates;
 use plan::{candidates, plan_landing};
 use report::{bind_integration_envelope, latest_finished_run, report_result};
-use seal::{
-    abandon_integration, advance_to_integration, seal_and_gate,
-};
+use seal::{abandon_integration, advance_to_integration, seal_and_gate};
 
 pub(crate) struct Candidate {
     id: String,

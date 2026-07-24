@@ -199,4 +199,3 @@ mod worker_result_tests {
         assert!(parse_worker_result(&buried).is_none());
     }
 }
-

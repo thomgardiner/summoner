@@ -5,7 +5,6 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-
 /// Paths changed since task begin (commits + dirty tree) that leave scope.
 pub(crate) fn outside_scope_paths(worktree: &Path, rec: &TaskRecord) -> Result<Vec<String>> {
     let mut outside = Vec::new();
@@ -116,4 +115,3 @@ pub(crate) fn candidate_source_digest(worktree: &Path) -> Result<String> {
     let tree = git_out(worktree, &["rev-parse", "HEAD^{tree}"])?;
     Ok(sha256_hex(format!("{commit}\0{tree}").as_bytes()))
 }
-

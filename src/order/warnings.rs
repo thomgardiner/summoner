@@ -5,8 +5,6 @@ use crate::order::Order;
 use crate::order::depends_on;
 use std::collections::BTreeMap;
 
-
-
 /// Identical scope strings across orders are not an error (grove serializes
 /// them: the later `task begin` reports a conflict and the order lands as
 /// blocked), but they are almost always an orchestrator mistake worth naming

@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::process::Command;
 
-use super::git::git;
 use super::Candidate;
+use super::git::git;
 
 pub(crate) fn merge_candidates(repo: &Path, order: &[Candidate]) -> (Vec<Value>, Option<Value>) {
     let mut landed = Vec::new();
@@ -33,7 +33,6 @@ pub(crate) fn merge_candidates(repo: &Path, order: &[Candidate]) -> (Vec<Value>,
     }
     (landed, None)
 }
-
 
 pub(crate) fn merge(repo: &Path, id: &str, commit: &str) -> Result<&'static str, String> {
     let output = Command::new("git")

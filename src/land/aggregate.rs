@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::process::Command;
 
-
 pub(crate) fn aggregate_verify(repo: &Path) -> Result<Value> {
     if let Ok(raw) = std::env::var("SUMMONER_LAND_VERIFY") {
         let argv: Vec<&str> = if raw.contains('\u{1f}') {

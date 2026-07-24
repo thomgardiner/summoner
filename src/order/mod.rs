@@ -16,7 +16,6 @@ pub(crate) use graph::depends_on;
 pub use validate::validate;
 pub use warnings::warnings;
 
-
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Order {

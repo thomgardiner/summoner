@@ -70,7 +70,12 @@ pub(crate) fn fail(
 
 /// Sets `report.outcome` on every path; returns Err only for summoner-side
 /// failures that map to `error`.
-pub(crate) fn drive(ctx: &Ctx, order: &Order, executor_name: &str, report: &mut OrderReport) -> Result<()> {
+pub(crate) fn drive(
+    ctx: &Ctx,
+    order: &Order,
+    executor_name: &str,
+    report: &mut OrderReport,
+) -> Result<()> {
     ctx.events.emit(
         "order_started",
         serde_json::json!({"id": order.id, "executor": executor_name}),
@@ -91,4 +96,3 @@ pub(crate) enum Flow {
     /// A revision was scheduled; run another attempt.
     Retry,
 }
-

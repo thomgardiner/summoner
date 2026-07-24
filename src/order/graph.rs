@@ -3,8 +3,6 @@
 use crate::order::Order;
 use std::collections::{BTreeMap, BTreeSet};
 
-
-
 /// Kahn's elimination: whatever cannot be topologically drained is in (or
 /// downstream of) a cycle. Unknown ids are reported separately and ignored here.
 pub(crate) fn cycle_members(orders: &[Order]) -> Vec<String> {

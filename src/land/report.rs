@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-use super::git::git;
 use super::Plan;
+use super::git::git;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn report_result(
@@ -152,7 +152,10 @@ mod tests {
         let integration = json!({"integration_commit":"abc123"});
         bind_integration_envelope(dir.path(), Some(&integration)).unwrap();
         let body: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(body["integration_candidate"]["integration_commit"], "abc123");
+        assert_eq!(
+            body["integration_candidate"]["integration_commit"],
+            "abc123"
+        );
         assert_eq!(body["envelope_sha256"].as_str().unwrap().len(), 64);
         assert_ne!(body["envelope_sha256"], "old");
     }
