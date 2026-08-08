@@ -21,7 +21,7 @@ CLI has four commands: check, plan, doctor, and run.
 
 ## Install
 
-The release installers work on macOS, Linux, and Windows. A source install is:
+The release archives work on macOS, Linux, and Windows. A source install is:
 
 ~~~
 cargo install --git https://github.com/thomgardiner/summoner --locked
