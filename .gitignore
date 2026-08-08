@@ -1,0 +1,13 @@
+/target
+.DS_Store
+# Public docs stay tracked (docs/reference.md). Everything else under docs/
+# is internal planning, research, or retros — never publish.
+docs/plans/
+docs/specs/
+docs/decisions/
+docs/research/
+docs/retros/
+
+# Order files are local orchestration, not product surface.
+/orders/
+docs/reviews/

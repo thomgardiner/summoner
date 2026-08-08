@@ -1,0 +1,10 @@
+# Repository verification needs only Cargo. Add an executor in personal config
+# before running a coding command, then select its name on an order.
+default_verify_profile = "cargo"
+
+[verification.profiles.cargo]
+commands = [
+  ["cargo", "fmt", "--all", "--", "--check"],
+  ["cargo", "clippy", "--all-targets", "--all-features", "--", "-D", "warnings"],
+  ["cargo", "test", "--all-targets", "--all-features"],
+]
